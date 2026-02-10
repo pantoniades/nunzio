@@ -1,0 +1,46 @@
+I'm building Nunzio, a conversational workout tracking assistant that runs locally. Here's the technical context:
+
+PROJECT: Nunzio - Local Workout Assistant
+GOAL: Build a Telegram bot that logs workouts, recommends exercises, and chats about fitness goals using local LLMs
+
+TECH STACK:
+- Python 3.13+ (use modern features: match/case, type hints, async/await)
+- python-telegram-bot (async) - for Telegram interface
+- ollama (async client) - connects to local Ollama at http://odysseus:11434
+- instructor (Pydantic-based structured outputs from LLM)
+- SQLAlchemy 2.0+ async with mysql-connector-python using the .aio package - MySQL 8.4 connection
+- MySQL on odysseus (host: odysseus, user: nunzio, db: nunzio_workouts) 
+- The application will run inisde a podman container and connect to MySQL and Ollama on the external host
+
+ARCHITECTURE:
+- Repository pattern for all DB access
+- Instructor pattern for LLM structured extraction (IntentClassifier, WorkoutExtractor)
+- ConversationManager handles intent routing
+- Simple rule-based recommendation engine (v1)
+
+DATA MODEL:
+- Exercise(id, name, muscle_group)
+- WorkoutSession(id, date, notes, created_at)
+- WorkoutSet(id, session_id, exercise_id, set_number, reps, weight, notes)
+
+CONVERSATIONAL FLOW:
+1. User sends message to Telegram bot
+2. Classify intent (log_workout, get_recommendation, chat, view_stats)
+3. Extract structured data if needed (exercise, sets, reps, weight, notes)
+4. Save to MySQL or generate response
+5. Reply conversationally
+
+DEVELOPMENT APPROACH:
+- Start with database layer and models
+- Build LLM integration next (Instructor + Ollama)
+- Wire up Telegram bot last
+- Single user (me), so no auth complexity
+- Prefer new Python features, state-of-the-art patterns
+
+Let's start by creating the project structure and SQLAlchemy async models. Create:
+1. pyproject.toml with dependencies
+2. src/nunzio/ package structure
+3. src/nunzio/database/models.py with async SQLAlchemy models
+4. src/nunzio/database/repository.py with async CRUD operations
+
+Use asyncio, typed annotations, and clear docstrings. Questions, or are we ready?
