@@ -2,11 +2,11 @@
 
 ## What This Is
 
-A CLI workout tracker that uses local LLM (Ollama) for natural language understanding and a MySQL database for persistence. You say what you did in plain English, the LLM extracts structured data, and it gets saved to the database.
+A workout tracker with two interfaces — CLI and Telegram bot — that uses a local LLM (Ollama) for natural language understanding and MySQL for persistence. You say what you did in plain English, the LLM extracts structured data, and it gets saved to the database. Ask for coaching and it gives specific prescriptions based on your actual history.
 
 ## Current State
 
-Working end-to-end CLI with context-aware coaching. The pipeline is: user input → LLM intent classification (with exercise/muscle group extraction) → routing to log_workout, view_stats, or coaching → DB persistence or LLM coaching response.
+Working end-to-end via both CLI and Telegram bot. The pipeline is: user input → LLM intent classification (with exercise/muscle group extraction) → routing to log_workout, view_stats, or coaching → DB persistence or LLM coaching response.
 
 What works:
 - Natural language workout logging via Ollama/Instructor structured extraction (JSON mode)
@@ -17,9 +17,13 @@ What works:
 - Workout session + set persistence with Float weight + unit tracking
 - Stats view (recent sessions, total volume, set counts)
 - Intent classification extracts mentioned exercises and muscle groups in the same LLM call
-- `nunzio` entry point via pyproject.toml
+- Telegram bot via long-polling (no port forwarding needed), with optional user ID restriction
+- `nunzio` (CLI) and `nunzio-bot` (Telegram) entry points via pyproject.toml
+- Containerfile for Podman deployment (runs the bot by default)
 
 ## Architecture
+
+**Two interfaces, shared core** — `core.MessageHandler` owns all message processing logic. The CLI (`cli.py`) and Telegram bot (`bot.py`) are thin wrappers. The handler takes a `verbose` flag: CLI gets session IDs and debug detail, the bot gets cleaner output.
 
 **Intent routing** — 3 intents: `log_workout`, `view_stats`, `coaching` (coaching is the catch-all).
 
@@ -38,6 +42,7 @@ This context block is injected into the user message alongside a coaching system
 - **LLM**: Ollama on `odysseus:11434`, model `qwen3:30b-a3b` (configurable via .env)
 - **DB**: MySQL on `odysseus:3306`, database `nunzio_workouts`
 - **Structured extraction**: Instructor library (JSON mode) wrapping Ollama for Pydantic model output
+- **Container**: Podman via multi-stage Containerfile, runs `nunzio-bot` by default. Config via `--env-file`.
 
 ## Schema Changes (requires create_tables.py + re-seed)
 
@@ -53,6 +58,10 @@ This context block is injected into the user message alongside a coaching system
 
 ## What's Next
 
+- **Multi-user support**: Currently single-user — all workouts go into one pool. The bot
+  needs per-user data isolation (tie workout sessions to Telegram user ID) so multiple
+  people can use the same bot without seeing each other's data. Requires schema change
+  (user table or user_id FK on sessions) and repository-level filtering.
 - **LLM serving backend (TBD)**: Currently using Ollama, but may switch. The LLM client
   uses `openai.AsyncOpenAI` pointed at Ollama's `/v1` compat endpoint — the native
   `ollama` Python client doesn't work with Instructor. This means switching backends
@@ -62,7 +71,6 @@ This context block is injected into the user message alongside a coaching system
   contextual workout suggestions instead of just listing exercises from the DB.
 - **Personality (TBD)**: Nunzio should evolve a personality — tone, encouragement style,
   how he talks about workouts. Details to be figured out.
-- Telegram bot integration (config is stubbed, no bot code yet)
 - Exercise name fuzzy matching (currently exact match + simple search fallback)
 - Richer stats (PRs, volume trends, per-exercise history)
 - Conversation context / multi-turn workout logging

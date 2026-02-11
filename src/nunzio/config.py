@@ -33,6 +33,10 @@ class TelegramConfig(BaseModel):
 
     token: str = Field(default="", description="Bot token")
     webhook_url: str | None = Field(default=None, description="Webhook URL (optional)")
+    allowed_user_ids: list[int] = Field(
+        default_factory=list,
+        description="Telegram user IDs allowed to use the bot (empty = no restriction)",
+    )
 
 
 class LoggingConfig(BaseModel):

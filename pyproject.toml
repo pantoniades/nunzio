@@ -22,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 nunzio = "nunzio.cli:main_sync"
+nunzio-bot = "nunzio.bot:main"
 
 [project.optional-dependencies]
 dev = [

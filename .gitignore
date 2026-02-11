@@ -1,4 +1,5 @@
 .env
+DEPLOY.md
 venv/
 __pycache__/
 *.pyc
