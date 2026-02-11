@@ -13,13 +13,13 @@ async def test_intent_classification(client: LLMClient) -> bool:
 
     test_cases = [
         ("I did 3 sets of bench press at 135 lbs", "log_workout"),
-        ("What exercises should I do for chest?", "get_recommendation"),
+        ("What exercises should I do for chest?", "coaching"),
         ("How's my squat progress?", "view_stats"),
-        ("Hello! How are you?", "chat"),
+        ("Hello! How are you?", "coaching"),
         ("I want to track my gym workout", "log_workout"),
-        ("Give me some exercise suggestions", "get_recommendation"),
+        ("Give me some exercise suggestions", "coaching"),
         ("Show me my workout stats", "view_stats"),
-        ("Tell me about fitness", "chat"),
+        ("Tell me about fitness", "coaching"),
     ]
 
     passed = 0
@@ -60,7 +60,7 @@ async def test_workout_extraction(client: LLMClient) -> bool:
             if result and result.exercises:
                 exercise_count = len(result.exercises)
                 total_volume = sum(
-                    (ex.weight or 0) * ex.reps for ex in result.exercises
+                    (ex.weight or 0) * (ex.reps or 0) for ex in result.exercises
                 )
                 print(
                     f"  PASS '{workout_desc}' -> {exercise_count} exercises, {total_volume} lbs volume"

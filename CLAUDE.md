@@ -45,6 +45,12 @@ This context block is injected into the user message alongside a coaching system
 - `workout_sets` table: `reps` now nullable, added `duration_minutes` INT and `distance` FLOAT
 - New `training_principles` table: `category`, `title`, `content`, `priority`
 
+## Development Discipline
+
+- **Run tests before considering any change done.** `pytest tests/` is the bar for "finished."
+- **Write at least a smoke test when adding a new feature** — don't move on without one. The coaching context pipeline shipped with zero tests and the intent rename silently broke existing ones. That's what happens when tests aren't part of the workflow.
+- Current tests hit real Ollama and MySQL. Mocking is on the TODO but isn't an excuse to skip running what exists.
+
 ## What's Next
 
 - **LLM serving backend (TBD)**: Currently using Ollama, but may switch. The LLM client

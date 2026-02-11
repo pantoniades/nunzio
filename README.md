@@ -1,14 +1,18 @@
 # Nunzio - Local Workout Assistant
 
-A conversational workout tracking assistant that runs locally, using local LLMs for natural language understanding and MySQL for persistence.
+A conversational workout tracking assistant that runs locally, using local LLMs for natural language understanding and MySQL for persistence. Tell Nunzio what you did in plain English, and he'll log it. Ask for advice, and he'll give specific prescriptions based on your actual history.
 
 ## Features
 
 - Natural language workout logging ("I did 3 sets of bench press at 185 lbs")
-- Local LLM integration via Ollama + Instructor for structured extraction
-- Exercise catalog with 29 exercises across 8 muscle groups
+- Cardio logging with duration and distance ("ran 3 miles in 25 minutes")
+- Context-aware coaching: advice based on your actual workout history, exercise guidance, and training principles — gives specific sets/reps/weight, not generic tips
+- Intent classification with exercise and muscle group extraction in a single LLM call
+- Exercise catalog with 29 exercises across 9 muscle groups (including cardio)
+- Training principles (progression, deload, rep ranges, volume, etc.) injected into coaching prompts
 - Workout statistics and progress tracking
-- Complete privacy - everything runs locally
+- Local LLM integration via Ollama + Instructor (JSON mode) for structured extraction
+- Complete privacy — everything runs locally
 
 ## Quick Start
 
@@ -44,11 +48,12 @@ GRANT ALL PRIVILEGES ON nunzio_workouts.* TO 'nunzio'@'%';
 FLUSH PRIVILEGES;
 ```
 
-Then create tables and seed the exercise catalog:
+Then create tables and seed data:
 
 ```bash
 python scripts/create_tables.py
 python scripts/seed_exercises.py
+python scripts/seed_principles.py
 ```
 
 ### Run the CLI
@@ -61,7 +66,9 @@ Then try:
 
 ```
 You: I did 3 sets of bench press at 185 lbs, 10 reps
+You: ran 3 miles in 25 minutes
 You: show my stats
+You: what should I bench next session?
 You: suggest some leg exercises
 You: help
 You: exit
@@ -74,6 +81,7 @@ To wipe all data and start fresh:
 ```bash
 python scripts/create_tables.py    # drops and recreates all tables
 python scripts/seed_exercises.py   # re-populates exercise catalog
+python scripts/seed_principles.py  # re-populates training principles
 ```
 
 ## Configuration
@@ -86,6 +94,8 @@ Key environment variables (see `.env.example`):
 
 ## Architecture
 
+Three intents: `log_workout`, `view_stats`, `coaching` (catch-all). The LLM classifies intent and extracts mentioned exercises/muscle groups in one call. Coaching queries go through a context assembly step that pulls the user's actual history, exercise guidance, and training principles before generating a response.
+
 ```
 src/nunzio/
 ├── cli.py             # Interactive CLI (entry point)
@@ -96,11 +106,12 @@ src/nunzio/
 │   ├── models.py      # SQLAlchemy models
 │   └── repository.py  # Repository pattern CRUD
 └── llm/
-    ├── client.py      # Ollama/Instructor: classify_intent, extract_workout_data
+    ├── client.py      # Ollama/Instructor: classify_intent, extract_workout_data, coaching
+    ├── context.py     # Coaching context assembly (history, guidance, principles)
     └── schemas.py     # Pydantic models for LLM I/O
 
 scripts/               # DB management scripts
-tests/                 # pytest tests
+tests/                 # Integration tests (hit real services)
 ```
 
 ## Development
@@ -110,3 +121,5 @@ pip install -e .[dev]
 ruff check src/
 pytest tests/
 ```
+
+Note: current tests hit real Ollama and MySQL instances — no mocks yet.
