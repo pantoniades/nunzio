@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """Test LLM integration: intent classification and workout extraction."""
 
-import asyncio
-import sys
+import pytest
 
 from nunzio.llm.client import LLMClient
 
 
-async def test_intent_classification(client: LLMClient) -> bool:
-    """Test intent classification accuracy."""
-    print("Testing Intent Classification...")
+@pytest.fixture
+async def client():
+    """Create and initialize an LLM client for testing."""
+    c = LLMClient()
+    await c.initialize()
+    yield c
+    await c.close()
 
+
+@pytest.mark.asyncio
+async def test_intent_classification(client: LLMClient):
+    """Test intent classification accuracy."""
     test_cases = [
         ("I did 3 sets of bench press at 135 lbs", "log_workout"),
         ("What exercises should I do for chest?", "coaching"),
@@ -26,24 +33,17 @@ async def test_intent_classification(client: LLMClient) -> bool:
     total = len(test_cases)
 
     for message, expected_intent in test_cases:
-        try:
-            result = await client.classify_intent(message)
-            if result.intent == expected_intent:
-                passed += 1
-                print(f"  PASS '{message}' -> {result.intent} ({result.confidence:.2f})")
-            else:
-                print(f"  FAIL '{message}' -> {result.intent} (expected: {expected_intent})")
-        except Exception as e:
-            print(f"  ERROR '{message}': {e}")
+        result = await client.classify_intent(message)
+        if result.intent == expected_intent:
+            passed += 1
 
-    print(f"Intent Classification: {passed}/{total} passed")
-    return passed >= total * 0.7
+    # Allow some LLM fuzziness — 70% threshold
+    assert passed >= total * 0.7, f"Intent classification: {passed}/{total} passed"
 
 
-async def test_workout_extraction(client: LLMClient) -> bool:
+@pytest.mark.asyncio
+async def test_workout_extraction(client: LLMClient):
     """Test workout data extraction."""
-    print("\nTesting Workout Data Extraction...")
-
     test_workouts = [
         "3 sets of bench press: 135x10, 135x8, 135x6",
         "Squat: 5x5 at 225 lbs",
@@ -55,47 +55,9 @@ async def test_workout_extraction(client: LLMClient) -> bool:
     total = len(test_workouts)
 
     for workout_desc in test_workouts:
-        try:
-            result = await client.extract_workout_data(workout_desc)
-            if result and result.exercises:
-                exercise_count = len(result.exercises)
-                total_volume = sum(
-                    (ex.weight or 0) * (ex.reps or 0) for ex in result.exercises
-                )
-                print(
-                    f"  PASS '{workout_desc}' -> {exercise_count} exercises, {total_volume} lbs volume"
-                )
-                passed += 1
-            else:
-                print(f"  FAIL '{workout_desc}' -> No valid extraction")
-        except Exception as e:
-            print(f"  ERROR '{workout_desc}': {e}")
+        result = await client.extract_workout_data(workout_desc)
+        if result and result.exercises:
+            passed += 1
 
-    print(f"Workout Extraction: {passed}/{total} passed")
-    return passed >= total * 0.6
-
-
-async def main() -> bool:
-    """Run LLM integration tests."""
-    print("LLM Integration Test Suite")
-    print("=" * 50)
-
-    client = LLMClient()
-    await client.initialize()
-
-    results = [
-        await test_intent_classification(client),
-        await test_workout_extraction(client),
-    ]
-
-    await client.close()
-
-    passed = sum(results)
-    total = len(results)
-    print(f"\nFinal: {passed}/{total} suites passed")
-    return passed == total
-
-
-if __name__ == "__main__":
-    success = asyncio.run(main())
-    sys.exit(0 if success else 1)
+    # Allow some LLM fuzziness — 60% threshold
+    assert passed >= total * 0.6, f"Workout extraction: {passed}/{total} passed"
