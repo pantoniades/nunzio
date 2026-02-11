@@ -6,7 +6,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .models import Base, Exercise, WorkoutSession, WorkoutSet
+from .models import Base, Exercise, TrainingPrinciple, WorkoutSession, WorkoutSet
 
 ModelType = TypeVar("ModelType", bound=Base)
 CreateSchemaType = TypeVar("CreateSchemaType")
@@ -210,7 +210,32 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
         return list(result.scalars().all())
 
 
+class TrainingPrincipleRepository(BaseRepository[TrainingPrinciple, dict, dict]):
+    """Repository for TrainingPrinciple operations."""
+
+    async def get_by_category(
+        self, session: AsyncSession, category: str
+    ) -> List[TrainingPrinciple]:
+        """Get training principles by category."""
+        stmt = select(TrainingPrinciple).where(
+            TrainingPrinciple.category == category
+        ).order_by(TrainingPrinciple.priority)
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_all_by_priority(
+        self, session: AsyncSession, *, limit: int = 10
+    ) -> List[TrainingPrinciple]:
+        """Get training principles ordered by priority (lower = more important)."""
+        stmt = select(TrainingPrinciple).order_by(
+            TrainingPrinciple.priority
+        ).limit(limit)
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+
 # Repository instances
 exercise_repo = ExerciseRepository(Exercise)
 workout_session_repo = WorkoutSessionRepository(WorkoutSession)
 workout_set_repo = WorkoutSetRepository(WorkoutSet)
+training_principle_repo = TrainingPrincipleRepository(TrainingPrinciple)

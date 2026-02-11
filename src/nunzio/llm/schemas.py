@@ -7,50 +7,57 @@ from pydantic import BaseModel, Field
 
 
 class UserIntent(BaseModel):
-    """User intent classification with confidence scoring."""
-    intent: Literal[
-        "log_workout", 
-        "get_recommendation", 
-        "chat", 
-        "view_stats"
-    ] = Field(description="Primary user intention")
-    confidence: float = Field(
-        ge=0.0, 
-        le=1.0, 
-        description="Confidence score for intent classification (0.0-1.0)"
+    """User intent classification with exercise/muscle group extraction."""
+    intent: Literal["log_workout", "view_stats", "coaching"] = Field(
+        description="Primary user intention"
     )
-    requires_clarification: bool = Field(
-        default=False,
-        description="Whether user message needs clarification"
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence score for intent classification (0.0-1.0)",
+    )
+    mentioned_exercises: List[str] = Field(
+        default_factory=list,
+        description="Exercise names mentioned in the message",
+    )
+    mentioned_muscle_groups: List[str] = Field(
+        default_factory=list,
+        description="Muscle groups mentioned in the message",
     )
 
 
 class ExerciseSet(BaseModel):
     """Individual exercise set within a workout."""
     exercise_name: str = Field(
-        description="Name of the exercise (e.g., 'Bench Press', 'Squat')"
+        description="Name of the exercise (e.g., 'Bench Press', 'Squat', 'Running')"
     )
     set_number: int = Field(
-        description="Set number"
+        default=1,
+        description="Set number (use 1 for cardio)",
     )
-    reps: int = Field(
-        description="Number of repetitions"
+    reps: Optional[int] = Field(
+        default=None,
+        description="Number of repetitions (None for cardio exercises)",
     )
     weight: Optional[float] = Field(
         default=None,
-        description="Weight in pounds"
+        description="Weight in pounds (None for cardio/bodyweight)",
     )
     unit: Literal["lbs", "kg", "bodyweight"] = Field(
         default="lbs",
-        description="Weight unit"
+        description="Weight unit",
     )
-    rest_time: Optional[int] = Field(
+    duration_minutes: Optional[int] = Field(
         default=None,
-        description="Rest time in seconds"
+        description="Duration in minutes (for cardio exercises like running, cycling, rowing, elliptical)",
+    )
+    distance: Optional[float] = Field(
+        default=None,
+        description="Distance covered (for cardio — miles or km)",
     )
     notes: Optional[str] = Field(
         default=None,
-        description="Notes about form or effort"
+        description="Notes about form or effort",
     )
 
 
@@ -78,47 +85,4 @@ class WorkoutData(BaseModel):
     perceived_exertion: Optional[int] = Field(
         default=None,
         description="RPE scale 1-10"
-    )
-
-
-class ConversationResponse(BaseModel):
-    """Response structure for bot replies."""
-    response_text: str = Field(
-        description="Text response to user"
-    )
-    confidence: float = Field(
-        ge=0.0,
-        le=1.0,
-        description="Confidence in response accuracy"
-    )
-    requires_clarification: bool = Field(
-        default=False,
-        description="Whether user needs to provide more information"
-    )
-    suggestions: List[str] = Field(
-        default_factory=list,
-        description="Follow-up suggestions for user"
-    )
-    next_intent: Optional[Literal[
-        "log_workout",
-        "get_recommendation", 
-        "view_stats",
-        "clarify_workout",
-        "confirm_workout"
-    ]] = Field(
-        default=None,
-        description="Expected next user action"
-    )
-
-
-class ClarificationRequest(BaseModel):
-    """Request for user clarification."""
-    missing_fields: List[str] = Field(
-        description="What information is still needed"
-    )
-    suggested_format: str = Field(
-        description="Suggested format for user's next message"
-    )
-    example_response: str = Field(
-        description="Example of how user should respond"
     )

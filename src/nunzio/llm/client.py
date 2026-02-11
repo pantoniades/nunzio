@@ -26,7 +26,9 @@ class LLMClient:
             base_url=f"{config.llm.base_url}/v1",
             api_key="ollama",
         )
-        self._instructor_client = instructor.from_openai(self._client)
+        self._instructor_client = instructor.from_openai(
+            self._client, mode=instructor.Mode.JSON
+        )
 
     @retry(
         stop=stop_after_attempt(3),
@@ -44,12 +46,15 @@ class LLMClient:
         MESSAGE: "{message}"
 
         POSSIBLE INTENTS:
-        - log_workout: User wants to record a workout they did
-        - get_recommendation: User wants exercise or workout suggestions
-        - chat: User wants general conversation
-        - view_stats: User wants to see their workout statistics
+        - log_workout: User is reporting a workout they already did (past tense: "I did", "I benched", etc.)
+        - view_stats: User wants to see their workout history or statistics
+        - coaching: User wants advice, recommendations, questions about training, or anything else
 
-        Return only the intent and confidence score. Be conservative.
+        Also extract any exercise names and muscle groups mentioned in the message.
+        Exercise names should match common names like "Bench Press", "Squat", "Deadlift", etc.
+        Muscle groups should match: chest, back, shoulders, legs, biceps, triceps, core, cardio, flexibility.
+
+        Return the intent, confidence score, any mentioned exercises, and any mentioned muscle groups.
         """
 
         try:
@@ -60,7 +65,6 @@ class LLMClient:
                 temperature=0.1,
                 max_retries=2,
             )
-            result.requires_clarification = result.confidence < 0.7
             return result
 
         except Exception:
@@ -68,27 +72,16 @@ class LLMClient:
             message_lower = message.lower()
             if any(
                 word in message_lower
-                for word in ["log", "did", "worked out", "gym", "sets", "reps"]
+                for word in ["log", "did", "worked out", "i benched", "sets", "reps"]
             ):
-                return UserIntent(
-                    intent="log_workout",
-                    confidence=0.6,
-                    requires_clarification=True,
-                )
-            elif any(
-                word in message_lower
-                for word in ["recommend", "suggest", "exercise"]
-            ):
-                return UserIntent(intent="get_recommendation", confidence=0.8)
+                return UserIntent(intent="log_workout", confidence=0.6)
             elif any(
                 word in message_lower
                 for word in ["stats", "progress", "history", "show"]
             ):
                 return UserIntent(intent="view_stats", confidence=0.9)
             else:
-                return UserIntent(
-                    intent="chat", confidence=0.5, requires_clarification=True
-                )
+                return UserIntent(intent="coaching", confidence=0.5)
 
     @retry(
         stop=stop_after_attempt(3),
@@ -106,10 +99,13 @@ class LLMClient:
 
         IMPORTANT:
         - Exercise names should match common exercises
-        - Extract exact set numbers, reps, and weights
+        - For strength exercises: extract set_number, reps, and weight
+        - For cardio exercises (running, cycling, elliptical, rowing, swimming, etc.):
+          use duration_minutes for time and distance if mentioned. Leave reps as null.
+          "20 minutes on the bike" → duration_minutes=20, reps=null
+          "ran 3 miles in 25 min" → duration_minutes=25, distance=3.0, reps=null
         - Weight in pounds unless specified otherwise
-        - If unclear, make reasonable assumptions but note uncertainty
-        - For cardio, extract duration instead of sets/reps
+        - If unclear, make reasonable assumptions
         """
 
         try:
@@ -127,6 +123,45 @@ class LLMClient:
         except Exception as e:
             print(f"Workout extraction failed: {e}")
             return None
+
+    async def generate_coaching_response(self, message: str, context: str) -> str:
+        """Generate a coaching response using context (history + guidance + principles)."""
+        if not self._client:
+            await self.initialize()
+
+        system_prompt = (
+            "You are Nunzio, a direct workout coach. Give specific, actionable advice "
+            "with exact sets, reps, and weights.\n\n"
+            "RULES:\n"
+            "- When the user's history is provided, base your advice on their actual numbers\n"
+            "- Prescribe specific weights: \"3x10 @ 35/40/40 lbs\" not \"moderate weight\"\n"
+            "- Progressive overload: if all target reps were hit last time, suggest +5 lbs "
+            "for barbell compounds, +5 lbs (per hand) for dumbbells, +2.5 lbs for isolation\n"
+            "- If they missed reps or stalled, suggest same weight or a deload\n"
+            "- For cardio: progress by adding duration or intervals, not weight. Reference "
+            "their recent times/distances. Suggest specific session plans (\"30 min steady "
+            "state at conversational pace\" or \"8x30s sprints with 90s rest\")\n"
+            "- Keep responses concise — a prescription and brief rationale, not an essay\n"
+            "- If there's not enough history, say so and give a conservative starting point\n"
+            "- Reference the exercise guidance and training principles provided in context"
+        )
+
+        user_content = message
+        if context:
+            user_content = f"{context}\n\n---\nUSER QUESTION: {message}"
+
+        try:
+            response = await self._client.chat.completions.create(
+                model=config.llm.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=0.7,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            return f"Sorry, I couldn't generate a response right now. ({e})"
 
     async def close(self) -> None:
         """Clean up LLM client resources."""

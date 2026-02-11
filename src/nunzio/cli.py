@@ -7,6 +7,7 @@ from datetime import datetime
 from .database.connection import db_manager
 from .database.repository import exercise_repo, workout_session_repo, workout_set_repo
 from .llm.client import LLMClient
+from .llm.context import build_coaching_context
 
 
 class NunzioCLI:
@@ -67,10 +68,8 @@ class NunzioCLI:
             return await self._handle_log_workout(message)
         elif intent.intent == "view_stats":
             return await self._handle_view_stats()
-        elif intent.intent == "get_recommendation":
-            return await self._handle_recommendation(message)
         else:
-            return self._handle_chat()
+            return await self._handle_coaching(message, intent)
 
     # ------------------------------------------------------------------
     # Handlers
@@ -116,14 +115,24 @@ class NunzioCLI:
                         "reps": ex_set.reps,
                         "weight": ex_set.weight,
                         "weight_unit": unit,
+                        "duration_minutes": ex_set.duration_minutes,
+                        "distance": ex_set.distance,
                     },
                 )
-                weight_str = f"{ex_set.weight} {ex_set.unit}" if ex_set.weight else "bodyweight"
-                logged.append(f"  {exercise.name}: set {ex_set.set_number} - {ex_set.reps} reps @ {weight_str}")
+
+                # Format display line
+                if ex_set.duration_minutes:
+                    parts = [f"{ex_set.duration_minutes} min"]
+                    if ex_set.distance:
+                        parts.append(f"{ex_set.distance} mi")
+                    logged.append(f"  {exercise.name}: {', '.join(parts)}")
+                else:
+                    weight_str = f"{ex_set.weight} {ex_set.unit}" if ex_set.weight else "bodyweight"
+                    logged.append(f"  {exercise.name}: set {ex_set.set_number} - {ex_set.reps} reps @ {weight_str}")
 
         lines = [f"Logged workout (session #{ws.id}):"] + logged
         total_volume = sum(
-            (s.weight or 0) * s.reps
+            (s.weight or 0) * (s.reps or 0)
             for s in workout_data.exercises
             if s.unit != "bodyweight"
         )
@@ -139,7 +148,7 @@ class NunzioCLI:
             if not sessions:
                 return "No workouts logged yet. Tell me about a workout to get started!"
 
-            total_volume = sum((s.weight or 0) * s.reps for s in all_sets)
+            total_volume = sum((s.weight or 0) * (s.reps or 0) for s in all_sets)
             lines = [
                 "Workout Stats:",
                 f"  Total sessions: {len(sessions)} (showing recent)",
@@ -161,58 +170,10 @@ class NunzioCLI:
 
             return "\n".join(lines)
 
-    async def _handle_recommendation(self, message: str) -> str:
-        msg_lower = message.lower()
-        target_group = None
-        group_keywords = {
-            "chest": ["chest", "pec"],
-            "back": ["back", "lat", "pull"],
-            "shoulders": ["shoulder", "delt"],
-            "legs": ["leg", "quad", "hamstring", "glute", "squat"],
-            "biceps": ["bicep", "curl"],
-            "triceps": ["tricep"],
-            "core": ["core", "ab", "abs"],
-            "cardio": ["cardio", "run", "conditioning"],
-        }
-        for group, keywords in group_keywords.items():
-            if any(kw in msg_lower for kw in keywords):
-                target_group = group
-                break
-
+    async def _handle_coaching(self, message: str, intent) -> str:
         async with db_manager.get_session() as session:
-            if target_group:
-                exercises = await exercise_repo.get_by_muscle_group(session, target_group)
-                if exercises:
-                    lines = [f"Exercises for {target_group}:"]
-                    for ex in exercises:
-                        desc = f" - {ex.description}" if ex.description else ""
-                        lines.append(f"  {ex.name}{desc}")
-                    return "\n".join(lines)
-
-            # Fallback: show a sampling across groups
-            all_exercises = await exercise_repo.get_multi(session, limit=100)
-            if not all_exercises:
-                return "No exercises in the database yet. Run the seed script to populate exercises."
-
-            by_group: dict[str, list[str]] = {}
-            for ex in all_exercises:
-                by_group.setdefault(ex.muscle_group, []).append(ex.name)
-
-            lines = ["Here are some exercises by muscle group:"]
-            for group, names in sorted(by_group.items()):
-                sample = names[:3]
-                lines.append(f"  {group}: {', '.join(sample)}")
-            lines.append("\nAsk about a specific muscle group for more detail.")
-            return "\n".join(lines)
-
-    def _handle_chat(self) -> str:
-        return (
-            "I can help you log workouts, view stats, or suggest exercises.\n"
-            "Try something like:\n"
-            '  "I did 3 sets of bench press at 185 lbs"\n'
-            '  "show my stats"\n'
-            '  "what should I do for legs?"'
-        )
+            context = await build_coaching_context(session, intent, message)
+            return await self._llm.generate_coaching_response(message, context)
 
     def _show_help(self) -> None:
         print(
