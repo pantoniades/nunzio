@@ -24,7 +24,7 @@ Two interfaces: interactive CLI for local use, Telegram bot for mobile (at the g
 
 - Python 3.12+
 - MySQL 8.4+
-- Ollama running with a model available
+- OpenAI compatible LLM service running with a model available
 
 ### Installation
 
