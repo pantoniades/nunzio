@@ -100,6 +100,15 @@ class LLMClient:
         IMPORTANT:
         - Exercise names should match common exercises
         - For strength exercises: extract set_number, reps, and weight
+        - When the user says "N sets", you MUST return N separate ExerciseSet objects,
+          one per set, with set_number 1 through N. Do NOT return a single object with
+          set_number=N.
+          Examples:
+          "2 sets of 10 rear delt fly at 40 lbs" → TWO ExerciseSet objects:
+            {{set_number: 1, reps: 10, weight: 40}} and {{set_number: 2, reps: 10, weight: 40}}
+          "did 3 sets of 8 curls 30 lbs" → THREE ExerciseSet objects:
+            {{set_number: 1, reps: 8, weight: 30}}, {{set_number: 2, reps: 8, weight: 30}},
+            {{set_number: 3, reps: 8, weight: 30}}
         - For cardio exercises (running, cycling, elliptical, rowing, swimming, etc.):
           use duration_minutes for time and distance if mentioned. Leave reps as null.
           "20 minutes on the bike" → duration_minutes=20, reps=null

@@ -34,10 +34,35 @@ class MessageHandler:
         else:
             return await self._handle_coaching(message, intent)
 
+    @staticmethod
+    def _expand_sets(exercises: list) -> list:
+        """Expand a lone set with set_number>1 into N copies.
+
+        Catches the LLM mistake where "2 sets of 10" becomes one ExerciseSet
+        with set_number=2 instead of two separate objects.
+        """
+        from collections import Counter
+
+        # Count how many ExerciseSet objects exist per exercise name
+        name_counts = Counter(ex.exercise_name for ex in exercises)
+
+        expanded: list = []
+        for ex in exercises:
+            if name_counts[ex.exercise_name] == 1 and ex.set_number > 1:
+                # Single entry with set_number > 1 → likely "N sets" misread as set #N
+                for i in range(1, ex.set_number + 1):
+                    copy = ex.model_copy(update={"set_number": i})
+                    expanded.append(copy)
+            else:
+                expanded.append(ex)
+        return expanded
+
     async def _handle_log_workout(self, message: str) -> str:
         workout_data = await self._llm.extract_workout_data(message)
         if not workout_data or not workout_data.exercises:
             return "I couldn't extract workout details. Try something like: '3 sets of bench press at 185 lbs, 10 reps'"
+
+        workout_data.exercises = self._expand_sets(workout_data.exercises)
 
         async with db_manager.get_session() as session:
             ws = await workout_session_repo.create(
