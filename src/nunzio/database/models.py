@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import List
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     Float,
     ForeignKey,
@@ -56,6 +57,7 @@ class WorkoutSession(Base):
     __tablename__ = "workout_sessions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     date: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
     )
@@ -76,6 +78,7 @@ class WorkoutSession(Base):
     __table_args__ = (
         Index("idx_workout_sessions_date", "date"),
         Index("idx_workout_sessions_created_at", "created_at"),
+        Index("idx_workout_sessions_user_id", "user_id"),
     )
 
     def __repr__(self) -> str:

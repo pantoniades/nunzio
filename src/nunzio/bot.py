@@ -45,7 +45,7 @@ class NunzioBot:
             return
 
         try:
-            response = await self._handler.process(text)
+            response = await self._handler.process(text, update.effective_user.id)
         except Exception:
             logger.exception("Error processing message from %s", update.effective_user.id)
             response = "Couldn't process that — try again in a sec."

@@ -14,6 +14,7 @@ What works:
 - Exercise catalog seeded in DB (29 exercises across 8 muscle groups) with per-exercise coaching guidance
 - Training principles table (9 principles: progression, deload, rep ranges, volume, etc.)
 - Context-aware coaching: LLM gets the user's actual history, exercise guidance, and training principles injected into the prompt — gives specific prescriptions (sets/reps/weight) not generic advice
+- Per-user data isolation: `user_id` (BigInteger) on `WorkoutSession`, all queries filtered. Telegram passes real user ID, CLI uses `user_id=0`
 - Workout session + set persistence with Float weight + unit tracking
 - Stats view (recent sessions, total volume, set counts)
 - Intent classification extracts mentioned exercises and muscle groups in the same LLM call
@@ -46,6 +47,7 @@ This context block is injected into the user message alongside a coaching system
 
 ## Schema Changes (requires create_tables.py + re-seed)
 
+- `workout_sessions` table: added `user_id` BIGINT NOT NULL with index
 - `exercises` table: added `guidance` TEXT column
 - `workout_sets` table: `reps` now nullable, added `duration_minutes` INT and `distance` FLOAT
 - New `training_principles` table: `category`, `title`, `content`, `priority`
@@ -58,10 +60,27 @@ This context block is injected into the user message alongside a coaching system
 
 ## What's Next
 
-- **Multi-user support**: Currently single-user — all workouts go into one pool. The bot
-  needs per-user data isolation (tie workout sessions to Telegram user ID) so multiple
-  people can use the same bot without seeing each other's data. Requires schema change
-  (user table or user_id FK on sessions) and repository-level filtering.
+- **Bug: "N sets of X" logs one set with set_number=N instead of N separate sets.**
+  "did rear delt 2 sets of 10 40 lb" → logs only "Set 2 - 10 reps @40.0 lbs" instead of
+  two separate sets. The LLM puts the count into `set_number` on a single ExerciseSet
+  instead of emitting N ExerciseSet objects. Fix is likely prompt-level (better examples
+  in the extraction prompt) and/or post-processing to expand a single set with
+  set_number>1 into N copies.
+- **Missing data should prompt a follow-up, not silently default.** Two variants:
+  1. Missing weight: "set of 10 reps bench press" logs @bodyweight because weight is
+     Optional and the display treats None as bodyweight.
+  2. Missing reps: "2 sets of face pulls at 40 lb" logs 0 reps — the LLM leaves reps
+     null/zero when not stated.
+  Nunzio should either use sensible defaults (e.g. assume 10 reps for strength if
+  unspecified) or ask the user to fill in the gap before saving. The follow-up approach
+  is better but harder — requires conversation state, holding partial data in memory,
+  and a confirmation flow. Touches core message handling.
+- **Edit/delete workouts.** No way to fix mistakes after logging. "20 sets of 10 reps"
+  gets recorded faithfully (correct behavior — no anomaly detection yet) but the user
+  has no way to undo or correct it. Needs at minimum: delete last session, delete
+  specific session by ID, and ideally edit individual sets. Could be commands ("delete
+  last", "delete session #42") routed through intent classification, or explicit slash
+  commands in Telegram (/undo, /delete).
 - **LLM serving backend (TBD)**: Currently using Ollama, but may switch. The LLM client
   uses `openai.AsyncOpenAI` pointed at Ollama's `/v1` compat endpoint — the native
   `ollama` Python client doesn't work with Instructor. This means switching backends

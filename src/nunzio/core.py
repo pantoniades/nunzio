@@ -23,16 +23,16 @@ class MessageHandler:
         await self._llm.close()
         await db_manager.close()
 
-    async def process(self, message: str) -> str:
+    async def process(self, message: str, user_id: int) -> str:
         """Classify intent and route to the appropriate handler."""
         intent = await self._llm.classify_intent(message)
 
         if intent.intent == "log_workout" and intent.confidence > 0.5:
-            return await self._handle_log_workout(message)
+            return await self._handle_log_workout(message, user_id)
         elif intent.intent == "view_stats":
-            return await self._handle_view_stats()
+            return await self._handle_view_stats(user_id)
         else:
-            return await self._handle_coaching(message, intent)
+            return await self._handle_coaching(message, intent, user_id)
 
     @staticmethod
     def _expand_sets(exercises: list) -> list:
@@ -57,7 +57,7 @@ class MessageHandler:
                 expanded.append(ex)
         return expanded
 
-    async def _handle_log_workout(self, message: str) -> str:
+    async def _handle_log_workout(self, message: str, user_id: int) -> str:
         workout_data = await self._llm.extract_workout_data(message)
         if not workout_data or not workout_data.exercises:
             return "I couldn't extract workout details. Try something like: '3 sets of bench press at 185 lbs, 10 reps'"
@@ -67,7 +67,7 @@ class MessageHandler:
         async with db_manager.get_session() as session:
             ws = await workout_session_repo.create(
                 session,
-                obj_in={"date": datetime.now(), "notes": message},
+                obj_in={"date": datetime.now(), "notes": message, "user_id": user_id},
             )
 
             logged: list[str] = []
@@ -127,10 +127,10 @@ class MessageHandler:
             lines.append(f"  Total volume: {total_volume:.0f} lbs")
         return "\n".join(lines)
 
-    async def _handle_view_stats(self) -> str:
+    async def _handle_view_stats(self, user_id: int) -> str:
         async with db_manager.get_session() as session:
-            sessions = await workout_session_repo.get_latest(session, limit=5)
-            all_sets = await workout_set_repo.get_multi(session, limit=1000)
+            sessions = await workout_session_repo.get_latest(session, user_id, limit=5)
+            all_sets = await workout_set_repo.get_by_user(session, user_id, limit=1000)
 
             if not sessions:
                 return "No workouts logged yet. Tell me about a workout to get started!"
@@ -164,7 +164,7 @@ class MessageHandler:
 
             return "\n".join(lines)
 
-    async def _handle_coaching(self, message: str, intent) -> str:
+    async def _handle_coaching(self, message: str, intent, user_id: int) -> str:
         async with db_manager.get_session() as session:
-            context = await build_coaching_context(session, intent, message)
+            context = await build_coaching_context(session, intent, message, user_id)
             return await self._llm.generate_coaching_response(message, context)

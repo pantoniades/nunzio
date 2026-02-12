@@ -16,6 +16,7 @@ Two interfaces: interactive CLI for local use, Telegram bot for mobile (at the g
 - Telegram bot via long-polling — no port forwarding or dynamic DNS needed
 - Podman container for deployment
 - Local LLM integration via Ollama + Instructor (JSON mode) for structured extraction
+- Multi-user support — each Telegram user's data is isolated (CLI uses a separate user ID)
 - Complete privacy — everything runs locally
 
 ## Quick Start

@@ -13,7 +13,7 @@ CARDIO_GROUPS = {"cardio"}
 
 
 async def build_coaching_context(
-    session: AsyncSession, intent: UserIntent, message: str
+    session: AsyncSession, intent: UserIntent, message: str, user_id: int
 ) -> str:
     """Assemble exercise history, guidance, and training principles into a prompt-ready string."""
 
@@ -69,7 +69,7 @@ async def build_coaching_context(
 
         # Pull recent sets (last 10)
         recent_sets = await workout_set_repo.get_by_exercise(
-            session, exercise.id, limit=10
+            session, exercise.id, user_id, limit=10
         )
 
         if recent_sets:

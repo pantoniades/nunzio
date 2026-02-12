@@ -5,6 +5,8 @@ import sys
 
 from .core import MessageHandler
 
+CLI_USER_ID = 0
+
 
 class NunzioCLI:
     """CLI wrapper around the shared message handler."""
@@ -31,7 +33,7 @@ class NunzioCLI:
                     self._show_help()
                     continue
 
-                response = await self._handler.process(user_input)
+                response = await self._handler.process(user_input, CLI_USER_ID)
                 print(f"Nunzio: {response}")
                 print("-" * 50)
 
