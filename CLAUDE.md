@@ -81,6 +81,8 @@ This context block is injected into the user message alongside a coaching system
   specific session by ID, and ideally edit individual sets. Could be commands ("delete
   last", "delete session #42") routed through intent classification, or explicit slash
   commands in Telegram (/undo, /delete).
+- **Specify Dates.**: Currently everything is "now". User should be able to specify 
+  "... yesterday" or "on Feb 24" and have the workout logged at the appropriate time.
 - **LLM serving backend (TBD)**: Currently using Ollama, but may switch. The LLM client
   uses `openai.AsyncOpenAI` pointed at Ollama's `/v1` compat endpoint — the native
   `ollama` Python client doesn't work with Instructor. This means switching backends
