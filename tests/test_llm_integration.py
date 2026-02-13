@@ -27,6 +27,12 @@ async def test_intent_classification(client: LLMClient):
         ("Give me some exercise suggestions", "coaching"),
         ("Show me my workout stats", "view_stats"),
         ("Tell me about fitness", "coaching"),
+        ("undo", "delete_workout"),
+        ("delete last workout", "delete_workout"),
+        ("delete session #42", "delete_workout"),
+        ("again", "repeat_last"),
+        ("repeat last workout", "repeat_last"),
+        ("same as last time", "repeat_last"),
     ]
 
     passed = 0

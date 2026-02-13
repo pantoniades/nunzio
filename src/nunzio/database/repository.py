@@ -6,7 +6,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .models import Base, Exercise, TrainingPrinciple, WorkoutSession, WorkoutSet
+from .models import Base, Exercise, MessageLog, TrainingPrinciple, WorkoutSession, WorkoutSet
 
 ModelType = TypeVar("ModelType", bound=Base)
 CreateSchemaType = TypeVar("CreateSchemaType")
@@ -118,6 +118,38 @@ class ExerciseRepository(BaseRepository[Exercise, dict, dict]):
         result = await session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_all(self, session: AsyncSession) -> List[Exercise]:
+        """Get all exercises."""
+        stmt = select(Exercise)
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    def score_match(query: str, name: str) -> float:
+        """Score exercise name match using word-overlap Jaccard similarity.
+
+        Tokenizes both strings, computes |intersection| / |union|.
+        """
+        q_tokens = set(query.lower().split())
+        n_tokens = set(name.lower().split())
+        if not q_tokens or not n_tokens:
+            return 0.0
+        intersection = q_tokens & n_tokens
+        union = q_tokens | n_tokens
+        return len(intersection) / len(union)
+
+    async def search_scored(
+        self, session: AsyncSession, query: str
+    ) -> List[tuple]:
+        """Score all exercises against query using word-overlap Jaccard.
+
+        Returns list of (Exercise, score) sorted by score descending.
+        """
+        all_exercises = await self.get_all(session)
+        scored = [(ex, self.score_match(query, ex.name)) for ex in all_exercises]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
 
 class WorkoutSessionRepository(BaseRepository[WorkoutSession, dict, dict]):
     """Repository for WorkoutSession operations."""
@@ -169,6 +201,41 @@ class WorkoutSessionRepository(BaseRepository[WorkoutSession, dict, dict]):
         )
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_latest_for_user(
+        self, session: AsyncSession, user_id: int
+    ) -> Optional[WorkoutSession]:
+        """Get the most recent session for a user with sets + exercises eagerly loaded."""
+        stmt = (
+            select(WorkoutSession)
+            .options(
+                selectinload(WorkoutSession.workout_sets).selectinload(WorkoutSet.exercise)
+            )
+            .where(WorkoutSession.user_id == user_id)
+            .order_by(WorkoutSession.date.desc())
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def delete_session(
+        self, session: AsyncSession, session_id: int, user_id: int
+    ) -> Optional[WorkoutSession]:
+        """Delete a session only if owned by user_id. Returns deleted session for confirmation."""
+        stmt = (
+            select(WorkoutSession)
+            .options(
+                selectinload(WorkoutSession.workout_sets).selectinload(WorkoutSet.exercise)
+            )
+            .where(WorkoutSession.id == session_id)
+            .where(WorkoutSession.user_id == user_id)
+        )
+        result = await session.execute(stmt)
+        ws = result.scalar_one_or_none()
+        if ws:
+            await session.delete(ws)
+            await session.flush()
+        return ws
 
 
 class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
@@ -259,8 +326,26 @@ class TrainingPrincipleRepository(BaseRepository[TrainingPrinciple, dict, dict])
         return list(result.scalars().all())
 
 
+class MessageLogRepository(BaseRepository[MessageLog, dict, dict]):
+    """Repository for MessageLog operations."""
+
+    async def get_by_user(
+        self, session: AsyncSession, user_id: int, *, limit: int = 50
+    ) -> List[MessageLog]:
+        """Get recent message logs for a user."""
+        stmt = (
+            select(MessageLog)
+            .where(MessageLog.user_id == user_id)
+            .order_by(MessageLog.created_at.desc())
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+
 # Repository instances
 exercise_repo = ExerciseRepository(Exercise)
 workout_session_repo = WorkoutSessionRepository(WorkoutSession)
 workout_set_repo = WorkoutSetRepository(WorkoutSet)
 training_principle_repo = TrainingPrincipleRepository(TrainingPrinciple)
+message_log_repo = MessageLogRepository(MessageLog)

@@ -6,7 +6,7 @@ A workout tracker with two interfaces — CLI and Telegram bot — that uses a l
 
 ## Current State
 
-Working end-to-end via both CLI and Telegram bot. The pipeline is: user input → LLM intent classification (with exercise/muscle group extraction) → routing to log_workout, view_stats, or coaching → DB persistence or LLM coaching response.
+Working end-to-end via both CLI and Telegram bot. The pipeline is: user input → LLM intent classification (with exercise/muscle group extraction) → routing to log_workout, view_stats, coaching, delete_workout, or repeat_last → DB persistence or LLM coaching response.
 
 What works:
 - Natural language workout logging via Ollama/Instructor structured extraction (JSON mode)
@@ -21,12 +21,18 @@ What works:
 - Telegram bot via long-polling (no port forwarding needed), with optional user ID restriction
 - `nunzio` (CLI) and `nunzio-bot` (Telegram) entry points via pyproject.toml
 - Containerfile for Podman deployment (runs the bot by default)
+- Delete/undo workouts: "undo", "delete last", "delete session #42" — routed via `delete_workout` intent
+- Repeat last workout: "again", "repeat last" — clones most recent session via `repeat_last` intent
+- Scored exercise matching: word-overlap Jaccard replaces ILIKE `%query%`. Exact match → use it, score ≥ 0.5 → use it (show mapping), score < 0.5 → create ad-hoc exercise with user's exact name
+- Raw exercise name preserved: `workout_sets.raw_exercise_name` stores what the user actually said. Response shows mapping when names differ (e.g. `Dumbbell Flyes (from "dumbbell fly")`)
+- Set-level notes pass through from LLM extraction to DB
+- Message logging: every message logged to `message_log` table with intent, confidence, and response summary
 
 ## Architecture
 
 **Two interfaces, shared core** — `core.MessageHandler` owns all message processing logic. The CLI (`cli.py`) and Telegram bot (`bot.py`) are thin wrappers. The handler takes a `verbose` flag: CLI gets session IDs and debug detail, the bot gets cleaner output.
 
-**Intent routing** — 3 intents: `log_workout`, `view_stats`, `coaching` (coaching is the catch-all).
+**Intent routing** — 5 intents: `log_workout`, `view_stats`, `coaching` (catch-all), `delete_workout`, `repeat_last`.
 
 **Coaching pipeline** — `build_coaching_context()` in `llm/context.py` assembles:
 1. Training principles by priority (top 6, plus cardio principle if relevant)
@@ -49,8 +55,10 @@ This context block is injected into the user message alongside a coaching system
 
 - `workout_sessions` table: added `user_id` BIGINT NOT NULL with index
 - `exercises` table: added `guidance` TEXT column
-- `workout_sets` table: `reps` now nullable, added `duration_minutes` INT and `distance` FLOAT
+- `workout_sets` table: `reps` now nullable, added `duration_minutes` INT, `distance` FLOAT, `raw_exercise_name` TEXT
 - New `training_principles` table: `category`, `title`, `content`, `priority`
+- New `message_log` table: `user_id`, `raw_message`, `classified_intent`, `confidence`, `extracted_data`, `response_summary`, `created_at`
+- v0.3 migration: `scripts/migrate_v03.py` (adds `raw_exercise_name` column + creates `message_log` table)
 
 ## Development Discipline
 
@@ -60,28 +68,16 @@ This context block is injected into the user message alongside a coaching system
 
 ## What's Next
 
-- **Bug: "N sets of X" logs one set with set_number=N instead of N separate sets.**
-  "did rear delt 2 sets of 10 40 lb" → logs only "Set 2 - 10 reps @40.0 lbs" instead of
-  two separate sets. The LLM puts the count into `set_number` on a single ExerciseSet
-  instead of emitting N ExerciseSet objects. Fix is likely prompt-level (better examples
-  in the extraction prompt) and/or post-processing to expand a single set with
-  set_number>1 into N copies.
-- **Missing data should prompt a follow-up, not silently default.** Two variants:
-  1. Missing weight: "set of 10 reps bench press" logs @bodyweight because weight is
-     Optional and the display treats None as bodyweight.
-  2. Missing reps: "2 sets of face pulls at 40 lb" logs 0 reps — the LLM leaves reps
-     null/zero when not stated.
-  Nunzio should either use sensible defaults (e.g. assume 10 reps for strength if
-  unspecified) or ask the user to fill in the gap before saving. The follow-up approach
-  is better but harder — requires conversation state, holding partial data in memory,
-  and a confirmation flow. Touches core message handling.
-- **Edit/delete workouts.** No way to fix mistakes after logging. "20 sets of 10 reps"
-  gets recorded faithfully (correct behavior — no anomaly detection yet) but the user
-  has no way to undo or correct it. Needs at minimum: delete last session, delete
-  specific session by ID, and ideally edit individual sets. Could be commands ("delete
-  last", "delete session #42") routed through intent classification, or explicit slash
-  commands in Telegram (/undo, /delete).
-- **Specify Dates.**: Currently everything is "now". User should be able to specify 
+- **Sensible defaults for missing reps/weight.** "Did 2 sets bench press at 100 lb"
+  logs 0 reps because the LLM leaves reps null when not stated. Fix: apply defaults
+  in `_handle_log_workout` post-extraction — 10 reps for strength exercises when reps
+  is None/0, bodyweight when weight is None. Show the assumed value in the response
+  so the user knows ("10 reps (assumed)"). Follow-up prompting ("how many reps?") is
+  better but needs conversation state — deferred.
+- **Edit individual sets.** Delete/undo works at session level. Still no way to edit
+  a single set within a session (change weight, fix reps). Could be "edit set #3 to 12 reps"
+  or "change weight on last set to 40 lbs".
+- **Specify Dates.**: Currently everything is "now". User should be able to specify
   "... yesterday" or "on Feb 24" and have the workout logged at the appropriate time.
 - **LLM serving backend (TBD)**: Currently using Ollama, but may switch. The LLM client
   uses `openai.AsyncOpenAI` pointed at Ollama's `/v1` compat endpoint — the native
@@ -90,9 +86,29 @@ This context block is injected into the user message alongside a coaching system
   OpenAI-compatible API. The `ollama` pip package is still in deps but unused at runtime.
 - **Web search for recommendations**: Let Nunzio search the web to give better, more
   contextual workout suggestions instead of just listing exercises from the DB.
-- **Personality (TBD)**: Nunzio should evolve a personality — tone, encouragement style,
-  how he talks about workouts. Details to be figured out.
-- Exercise name fuzzy matching (currently exact match + simple search fallback)
+- **Proactive check-ins (cron).** Nunzio should reach out unprompted via Telegram:
+  congratulate when a session shows upward trends (new PR, volume increase, consistency
+  streak), and nudge if the user hasn't logged a workout in N days. Needs a scheduled
+  job (cron or async loop) that queries recent history per user, runs trend detection,
+  and sends a message through the bot. Personality lives here too — tone, encouragement
+  style, how blunt the nudges are.
+- **Extract equipment/variant modifiers into set notes.** "purple band chest pull" should
+  extract as exercise_name="Chest Pull" with notes="purple band". Currently the LLM
+  strips modifiers and they're only preserved in `raw_exercise_name`. Fix is a prompt
+  change in `extract_workout_data()`: tell the LLM to put equipment, band color, grip
+  width, tempo, etc. into `ExerciseSet.notes` and keep the base exercise name clean.
+  This way stats aggregate correctly (all chest pulls together) while the variant info
+  is preserved and visible. Note: band color/type is really resistance info — a purple
+  band is a different load than a red band. For now, freeform notes capture this well
+  enough without a band-resistance taxonomy.
+- **Workout notes.** Set-level notes now pass through from extraction to DB, but session-level
+  notes from freeform text (e.g. "shoulder hurt") aren't extracted separately — the raw
+  message is stored as session notes, which is a rough approximation.
+- **Body weight tracking.** New intent: "weighed 191.4 lb" saves the user's weight with
+  timestamp. New `body_weight` table: `user_id`, `weight`, `unit`, `recorded_at`. Needs
+  a new intent in classification (e.g. `log_weight`), a simple extraction model, and a
+  way to view history ("what's my weight trend?"). Could tie into coaching context too —
+  the LLM knowing the user's weight trend is useful for advice.
 - Richer stats (PRs, volume trends, per-exercise history)
 - Conversation context / multi-turn workout logging
 - Proper test coverage with mocked LLM/DB (current tests hit real services)

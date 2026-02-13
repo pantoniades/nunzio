@@ -1,9 +1,10 @@
 """Core message processing — shared by CLI and Telegram bot."""
 
+import re
 from datetime import datetime
 
 from .database.connection import db_manager
-from .database.repository import exercise_repo, workout_session_repo, workout_set_repo
+from .database.repository import exercise_repo, message_log_repo, workout_session_repo, workout_set_repo
 from .llm.client import LLMClient
 from .llm.context import build_coaching_context
 
@@ -28,11 +29,34 @@ class MessageHandler:
         intent = await self._llm.classify_intent(message)
 
         if intent.intent == "log_workout" and intent.confidence > 0.5:
-            return await self._handle_log_workout(message, user_id)
+            response = await self._handle_log_workout(message, user_id)
         elif intent.intent == "view_stats":
-            return await self._handle_view_stats(user_id)
+            response = await self._handle_view_stats(user_id)
+        elif intent.intent == "delete_workout":
+            response = await self._handle_delete_workout(message, user_id)
+        elif intent.intent == "repeat_last":
+            response = await self._handle_repeat_last(user_id)
         else:
-            return await self._handle_coaching(message, intent, user_id)
+            response = await self._handle_coaching(message, intent, user_id)
+
+        # Fire-and-forget message logging — failure must not block the response
+        try:
+            async with db_manager.get_session() as session:
+                await message_log_repo.create(
+                    session,
+                    obj_in={
+                        "user_id": user_id,
+                        "raw_message": message,
+                        "classified_intent": intent.intent,
+                        "confidence": intent.confidence,
+                        "extracted_data": None,
+                        "response_summary": response[:200] if response else None,
+                    },
+                )
+        except Exception:
+            pass
+
+        return response
 
     @staticmethod
     def _expand_sets(exercises: list) -> list:
@@ -72,18 +96,24 @@ class MessageHandler:
 
             logged: list[str] = []
             for ex_set in workout_data.exercises:
-                exercise = await exercise_repo.get_by_name(session, ex_set.exercise_name)
+                raw_name = ex_set.exercise_name
+                matched_differently = False
+
+                # 1. Exact name match
+                exercise = await exercise_repo.get_by_name(session, raw_name)
+
                 if not exercise:
-                    candidates = await exercise_repo.search(
-                        session, ex_set.exercise_name, limit=1
-                    )
-                    if candidates:
-                        exercise = candidates[0]
+                    # 2. Scored matching against catalog
+                    scored = await exercise_repo.search_scored(session, raw_name)
+                    if scored and scored[0][1] >= 0.5:
+                        exercise = scored[0][0]
+                        matched_differently = (exercise.name.lower() != raw_name.lower())
                     else:
+                        # 3. Score too low — create ad-hoc exercise with user's name
                         exercise = await exercise_repo.create(
                             session,
                             obj_in={
-                                "name": ex_set.exercise_name,
+                                "name": raw_name,
                                 "muscle_group": "general",
                             },
                         )
@@ -100,20 +130,27 @@ class MessageHandler:
                         "weight_unit": unit,
                         "duration_minutes": ex_set.duration_minutes,
                         "distance": ex_set.distance,
+                        "raw_exercise_name": raw_name,
+                        "notes": ex_set.notes,
                     },
                 )
+
+                # Build display name — show mapping when matched differently
+                display_name = exercise.name
+                if matched_differently:
+                    display_name = f'{exercise.name} (from "{raw_name}")'
 
                 if ex_set.duration_minutes:
                     parts = [f"{ex_set.duration_minutes} min"]
                     if ex_set.distance:
                         parts.append(f"{ex_set.distance} mi")
-                    logged.append(f"  {exercise.name}: {', '.join(parts)}")
+                    logged.append(f"  {display_name}: {', '.join(parts)}")
                 else:
                     weight_str = (
                         f"{ex_set.weight} {ex_set.unit}" if ex_set.weight else "bodyweight"
                     )
                     logged.append(
-                        f"  {exercise.name}: set {ex_set.set_number} - {ex_set.reps} reps @ {weight_str}"
+                        f"  {display_name}: set {ex_set.set_number} - {ex_set.reps} reps @ {weight_str}"
                     )
 
         header = f"Logged workout (session #{ws.id}):" if self._verbose else "Logged:"
@@ -126,6 +163,86 @@ class MessageHandler:
         if total_volume > 0:
             lines.append(f"  Total volume: {total_volume:.0f} lbs")
         return "\n".join(lines)
+
+    @staticmethod
+    def _parse_session_id(message: str) -> int | None:
+        """Extract a session ID from a message like 'delete session #42' or 'delete 42'."""
+        match = re.search(r"#?(\d+)", message)
+        if match:
+            return int(match.group(1))
+        return None
+
+    async def _handle_delete_workout(self, message: str, user_id: int) -> str:
+        """Delete a workout session — 'undo'/'delete last' or by session ID."""
+        msg_lower = message.lower()
+        async with db_manager.get_session() as session:
+            # "undo", "delete last", or no specific ID → delete most recent
+            if any(word in msg_lower for word in ["undo", "last"]) or not re.search(r"\d+", message):
+                ws = await workout_session_repo.get_latest_for_user(session, user_id)
+                if not ws:
+                    return "Nothing to delete — no workouts found."
+                session_id = ws.id
+            else:
+                session_id = self._parse_session_id(message)
+                if not session_id:
+                    return "I couldn't figure out which session to delete. Try 'undo' or 'delete session #42'."
+
+            deleted = await workout_session_repo.delete_session(session, session_id, user_id)
+            if not deleted:
+                return f"Session #{session_id} not found (or not yours)."
+
+            # Build confirmation showing what was deleted
+            exercises: list[str] = []
+            for s in deleted.workout_sets:
+                name = s.exercise.name if s.exercise else f"exercise #{s.exercise_id}"
+                if name not in exercises:
+                    exercises.append(name)
+            date_str = deleted.date.strftime("%b %d")
+            ex_str = ", ".join(exercises) if exercises else "no exercises"
+            return f"Deleted session #{deleted.id} ({date_str}): {ex_str} — {len(deleted.workout_sets)} sets removed."
+
+    async def _handle_repeat_last(self, user_id: int) -> str:
+        """Repeat the user's most recent workout session."""
+        async with db_manager.get_session() as session:
+            last = await workout_session_repo.get_latest_for_user(session, user_id)
+            if not last or not last.workout_sets:
+                return "Nothing to repeat — no previous workouts found."
+
+            # Create new session mirroring the old one
+            new_ws = await workout_session_repo.create(
+                session,
+                obj_in={"date": datetime.now(), "notes": f"Repeat of session #{last.id}", "user_id": user_id},
+            )
+
+            logged: list[str] = []
+            for old_set in sorted(last.workout_sets, key=lambda s: (s.exercise_id, s.set_number)):
+                await workout_set_repo.create(
+                    session,
+                    obj_in={
+                        "session_id": new_ws.id,
+                        "exercise_id": old_set.exercise_id,
+                        "set_number": old_set.set_number,
+                        "reps": old_set.reps,
+                        "weight": old_set.weight,
+                        "weight_unit": old_set.weight_unit,
+                        "duration_minutes": old_set.duration_minutes,
+                        "distance": old_set.distance,
+                        "raw_exercise_name": old_set.raw_exercise_name if hasattr(old_set, "raw_exercise_name") else None,
+                        "notes": old_set.notes,
+                    },
+                )
+                name = old_set.exercise.name if old_set.exercise else f"exercise #{old_set.exercise_id}"
+                if old_set.duration_minutes:
+                    parts = [f"{old_set.duration_minutes} min"]
+                    if old_set.distance:
+                        parts.append(f"{old_set.distance} mi")
+                    logged.append(f"  {name}: {', '.join(parts)}")
+                else:
+                    weight_str = f"{old_set.weight} {old_set.weight_unit}" if old_set.weight else "bodyweight"
+                    logged.append(f"  {name}: set {old_set.set_number} - {old_set.reps} reps @ {weight_str}")
+
+        header = f"Repeated session #{last.id} → new session #{new_ws.id}:" if self._verbose else "Repeated last workout:"
+        return "\n".join([header] + logged)
 
     async def _handle_view_stats(self, user_id: int) -> str:
         async with db_manager.get_session() as session:

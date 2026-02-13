@@ -103,6 +103,7 @@ class WorkoutSet(Base):
     weight_unit: Mapped[str] = mapped_column(String(10), nullable=False, default="lbs")
     duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     distance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raw_exercise_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
@@ -130,6 +131,31 @@ class WorkoutSet(Base):
             f"exercise_id={self.exercise_id}, set_number={self.set_number}, "
             f"reps={self.reps}, weight={weight_str})>"
         )
+
+
+class MessageLog(Base):
+    """Log of every user message and how Nunzio interpreted it."""
+
+    __tablename__ = "message_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    raw_message: Mapped[str] = mapped_column(Text, nullable=False)
+    classified_intent: Mapped[str] = mapped_column(String(50), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    extracted_data: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+
+    __table_args__ = (
+        Index("idx_message_log_user_id", "user_id"),
+        Index("idx_message_log_created_at", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<MessageLog(id={self.id}, intent='{self.classified_intent}', confidence={self.confidence})>"
 
 
 class TrainingPrinciple(Base):
