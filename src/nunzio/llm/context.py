@@ -86,7 +86,10 @@ async def build_coaching_context(
                         parts.append(f"{ws.distance} mi")
                     if not parts and ws.reps:
                         parts.append(f"{ws.reps} reps")
-                    ex_lines.append(f"- {date_str}: {', '.join(parts) or '?'}")
+                    line = f"- {date_str}: {', '.join(parts) or '?'}"
+                    if ws.notes:
+                        line += f" ({ws.notes})"
+                    ex_lines.append(line)
             else:
                 # Strength: group by session, show sets/reps/weight
                 # Group consecutive sets from the same session
@@ -106,13 +109,17 @@ async def build_coaching_context(
                             str(int(s.weight) if s.weight == int(s.weight) else s.weight)
                             for s in sets
                         )
-                        ex_lines.append(
-                            f"- {date_str}: {set_count}x reps {reps_str} @ {weights_str} {first.weight_unit}"
-                        )
+                        line = f"- {date_str}: {set_count}x reps {reps_str} @ {weights_str} {first.weight_unit}"
                     else:
-                        ex_lines.append(
-                            f"- {date_str}: {set_count}x reps {reps_str} (bodyweight)"
-                        )
+                        line = f"- {date_str}: {set_count}x reps {reps_str} (bodyweight)"
+
+                    # Collect unique notes from this session's sets
+                    session_notes = list(dict.fromkeys(
+                        s.notes for s in sets if s.notes
+                    ))
+                    if session_notes:
+                        line += f" ({'; '.join(session_notes)})"
+                    ex_lines.append(line)
 
                 # PR: heaviest weight × reps
                 pr_sets = [s for s in recent_sets if s.weight is not None]

@@ -127,6 +127,13 @@ class LLMClient:
           "ran 3 miles in 25 min" → duration_minutes=25, distance=3.0, reps=null
         - Weight in pounds unless specified otherwise
         - If unclear, make reasonable assumptions
+        - NOTES: Any subjective observations (pain, effort, form, mood) or equipment/variant
+          modifiers (band color, grip width, cable attachment, tempo) go in the `notes` field.
+          Keep the exercise name clean — just the base movement.
+          Examples:
+          "bench press at 100 lb shoulder sore" → exercise_name="Bench Press", notes="shoulder sore"
+          "purple band chest pull" → exercise_name="Chest Pull", notes="purple band"
+          "wide grip lat pulldown felt easy" → exercise_name="Lat Pulldown", notes="wide grip, felt easy"
         """
 
         try:

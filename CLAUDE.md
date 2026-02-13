@@ -26,6 +26,9 @@ What works:
 - Scored exercise matching: word-overlap Jaccard replaces ILIKE `%query%`. Exact match → use it, score ≥ 0.5 → use it (show mapping), score < 0.5 → create ad-hoc exercise with user's exact name
 - Raw exercise name preserved: `workout_sets.raw_exercise_name` stores what the user actually said. Response shows mapping when names differ (e.g. `Dumbbell Flyes (from "dumbbell fly")`)
 - Set-level notes pass through from LLM extraction to DB
+- Notes extraction: LLM prompt extracts subjective observations and equipment modifiers into `notes` field, keeping exercise names clean
+- Sensible defaults: missing reps default to 10 for strength sets (shown as "assumed" in response)
+- Coaching context includes set notes (pain, effort, equipment) in history lines
 - Message logging: every message logged to `message_log` table with intent, confidence, and response summary
 
 ## Architecture
@@ -68,12 +71,9 @@ This context block is injected into the user message alongside a coaching system
 
 ## What's Next
 
-- **Sensible defaults for missing reps/weight.** "Did 2 sets bench press at 100 lb"
-  logs 0 reps because the LLM leaves reps null when not stated. Fix: apply defaults
-  in `_handle_log_workout` post-extraction — 10 reps for strength exercises when reps
-  is None/0, bodyweight when weight is None. Show the assumed value in the response
-  so the user knows ("10 reps (assumed)"). Follow-up prompting ("how many reps?") is
-  better but needs conversation state — deferred.
+- ~~**Sensible defaults for missing reps.**~~ **Done (v0.4).** Missing reps default
+  to 10 for strength sets; "(assumed)" shown in response. Cardio sets with
+  `duration_minutes` are skipped. Follow-up prompting deferred (needs conversation state).
 - **Edit individual sets.** Delete/undo works at session level. Still no way to edit
   a single set within a session (change weight, fix reps). Could be "edit set #3 to 12 reps"
   or "change weight on last set to 40 lbs".
@@ -86,24 +86,25 @@ This context block is injected into the user message alongside a coaching system
   OpenAI-compatible API. The `ollama` pip package is still in deps but unused at runtime.
 - **Web search for recommendations**: Let Nunzio search the web to give better, more
   contextual workout suggestions instead of just listing exercises from the DB.
+- **Personality on log responses.** When logging a workout, Nunzio could add a brief
+  context-aware comment based on the notes and history. E.g. if notes say "difficult set"
+  → "Great job getting through it"; if the user jumped in weight → "Scale back if you
+  feel pain". Needs a lightweight LLM call (or heuristic) after the log is saved, appended
+  to the confirmation message. Keep it one line, not an essay.
 - **Proactive check-ins (cron).** Nunzio should reach out unprompted via Telegram:
   congratulate when a session shows upward trends (new PR, volume increase, consistency
   streak), and nudge if the user hasn't logged a workout in N days. Needs a scheduled
   job (cron or async loop) that queries recent history per user, runs trend detection,
   and sends a message through the bot. Personality lives here too — tone, encouragement
   style, how blunt the nudges are.
-- **Extract equipment/variant modifiers into set notes.** "purple band chest pull" should
-  extract as exercise_name="Chest Pull" with notes="purple band". Currently the LLM
-  strips modifiers and they're only preserved in `raw_exercise_name`. Fix is a prompt
-  change in `extract_workout_data()`: tell the LLM to put equipment, band color, grip
-  width, tempo, etc. into `ExerciseSet.notes` and keep the base exercise name clean.
-  This way stats aggregate correctly (all chest pulls together) while the variant info
-  is preserved and visible. Note: band color/type is really resistance info — a purple
-  band is a different load than a red band. For now, freeform notes capture this well
-  enough without a band-resistance taxonomy.
-- **Workout notes.** Set-level notes now pass through from extraction to DB, but session-level
-  notes from freeform text (e.g. "shoulder hurt") aren't extracted separately — the raw
-  message is stored as session notes, which is a rough approximation.
+- ~~**Extract equipment/variant modifiers into set notes.**~~ **Done (v0.4).** Extraction
+  prompt now tells the LLM to put subjective observations (pain, effort, mood) and
+  equipment modifiers (band color, grip width, tempo) into `notes`, keeping exercise
+  names clean. Notes also surface in coaching context history lines.
+- **Workout notes.** Set-level notes now pass through from extraction to DB and appear
+  in coaching context. Session-level notes from freeform text (e.g. "shoulder hurt")
+  aren't extracted separately — the raw message is stored as session notes, which is
+  a rough approximation.
 - **Body weight tracking.** New intent: "weighed 191.4 lb" saves the user's weight with
   timestamp. New `body_weight` table: `user_id`, `weight`, `unit`, `recorded_at`. Needs
   a new intent in classification (e.g. `log_weight`), a simple extraction model, and a

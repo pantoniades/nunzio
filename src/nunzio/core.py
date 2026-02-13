@@ -35,7 +35,7 @@ class MessageHandler:
         elif intent.intent == "delete_workout":
             response = await self._handle_delete_workout(message, user_id)
         elif intent.intent == "repeat_last":
-            response = await self._handle_repeat_last(user_id)
+            response = await self._handle_repeat_last(message, user_id)
         else:
             response = await self._handle_coaching(message, intent, user_id)
 
@@ -88,6 +88,15 @@ class MessageHandler:
 
         workout_data.exercises = self._expand_sets(workout_data.exercises)
 
+        # Apply sensible defaults for missing reps (strength only)
+        defaulted_reps: set[int] = set()  # indices where we assumed reps
+        for i, ex_set in enumerate(workout_data.exercises):
+            if ex_set.duration_minutes:
+                continue  # cardio — no reps expected
+            if not ex_set.reps:
+                ex_set.reps = 10
+                defaulted_reps.add(i)
+
         async with db_manager.get_session() as session:
             ws = await workout_session_repo.create(
                 session,
@@ -95,7 +104,7 @@ class MessageHandler:
             )
 
             logged: list[str] = []
-            for ex_set in workout_data.exercises:
+            for set_idx, ex_set in enumerate(workout_data.exercises):
                 raw_name = ex_set.exercise_name
                 matched_differently = False
 
@@ -144,14 +153,19 @@ class MessageHandler:
                     parts = [f"{ex_set.duration_minutes} min"]
                     if ex_set.distance:
                         parts.append(f"{ex_set.distance} mi")
-                    logged.append(f"  {display_name}: {', '.join(parts)}")
+                    line = f"  {display_name}: {', '.join(parts)}"
                 else:
                     weight_str = (
                         f"{ex_set.weight} {ex_set.unit}" if ex_set.weight else "bodyweight"
                     )
-                    logged.append(
-                        f"  {display_name}: set {ex_set.set_number} - {ex_set.reps} reps @ {weight_str}"
-                    )
+                    reps_display = f"{ex_set.reps} reps"
+                    if set_idx in defaulted_reps:
+                        reps_display += " (assumed)"
+                    line = f"  {display_name}: set {ex_set.set_number} - {reps_display} @ {weight_str}"
+
+                if ex_set.notes:
+                    line += f" — note: {ex_set.notes}"
+                logged.append(line)
 
         header = f"Logged workout (session #{ws.id}):" if self._verbose else "Logged:"
         lines = [header] + logged
@@ -201,8 +215,21 @@ class MessageHandler:
             ex_str = ", ".join(exercises) if exercises else "no exercises"
             return f"Deleted session #{deleted.id} ({date_str}): {ex_str} — {len(deleted.workout_sets)} sets removed."
 
-    async def _handle_repeat_last(self, user_id: int) -> str:
+    @staticmethod
+    def _extract_repeat_note(message: str) -> str | None:
+        """Strip trigger words from a repeat message; remainder becomes the note."""
+        stripped = re.sub(
+            r"\b(same as last time|repeat last|same thing|again|repeat)\b",
+            "",
+            message,
+            flags=re.IGNORECASE,
+        ).strip(" ,.-;:")
+        return stripped or None
+
+    async def _handle_repeat_last(self, message: str, user_id: int) -> str:
         """Repeat the user's most recent workout session."""
+        new_note = self._extract_repeat_note(message)
+
         async with db_manager.get_session() as session:
             last = await workout_session_repo.get_latest_for_user(session, user_id)
             if not last or not last.workout_sets:
@@ -228,7 +255,7 @@ class MessageHandler:
                         "duration_minutes": old_set.duration_minutes,
                         "distance": old_set.distance,
                         "raw_exercise_name": old_set.raw_exercise_name if hasattr(old_set, "raw_exercise_name") else None,
-                        "notes": old_set.notes,
+                        "notes": new_note,  # new note (if any), never carry over old
                     },
                 )
                 name = old_set.exercise.name if old_set.exercise else f"exercise #{old_set.exercise_id}"
@@ -236,10 +263,13 @@ class MessageHandler:
                     parts = [f"{old_set.duration_minutes} min"]
                     if old_set.distance:
                         parts.append(f"{old_set.distance} mi")
-                    logged.append(f"  {name}: {', '.join(parts)}")
+                    line = f"  {name}: {', '.join(parts)}"
                 else:
                     weight_str = f"{old_set.weight} {old_set.weight_unit}" if old_set.weight else "bodyweight"
-                    logged.append(f"  {name}: set {old_set.set_number} - {old_set.reps} reps @ {weight_str}")
+                    line = f"  {name}: set {old_set.set_number} - {old_set.reps} reps @ {weight_str}"
+                if new_note:
+                    line += f" — note: {new_note}"
+                logged.append(line)
 
         header = f"Repeated session #{last.id} → new session #{new_ws.id}:" if self._verbose else "Repeated last workout:"
         return "\n".join([header] + logged)
