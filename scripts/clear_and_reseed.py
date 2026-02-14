@@ -19,7 +19,6 @@ async def clear_and_reseed():
 
         async with db_manager.get_session() as session:
             await session.execute(text("DELETE FROM workout_sets"))
-            await session.execute(text("DELETE FROM workout_sessions"))
             await session.execute(text("DELETE FROM exercises"))
             await session.commit()
             print("Cleared all data.")

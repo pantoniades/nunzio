@@ -78,7 +78,7 @@ async def build_coaching_context(
 
             if is_cardio:
                 for ws in recent_sets:
-                    date_str = ws.session.date.strftime("%b %d") if ws.session else "?"
+                    date_str = ws.set_date.strftime("%b %d")
                     parts = []
                     if ws.duration_minutes:
                         parts.append(f"{ws.duration_minutes} min")
@@ -91,17 +91,14 @@ async def build_coaching_context(
                         line += f" ({ws.notes})"
                     ex_lines.append(line)
             else:
-                # Strength: group by session, show sets/reps/weight
-                # Group consecutive sets from the same session
-                by_session: dict[int, list] = {}
+                # Strength: group by batch_id, show sets/reps/weight
+                by_batch: dict[int, list] = {}
                 for ws in recent_sets:
-                    by_session.setdefault(ws.session_id, []).append(ws)
+                    by_batch.setdefault(ws.batch_id, []).append(ws)
 
-                for session_id, sets in list(by_session.items())[:5]:
+                for batch_id, sets in list(by_batch.items())[:5]:
                     first = sets[0]
-                    date_str = (
-                        first.session.date.strftime("%b %d") if first.session else "?"
-                    )
+                    date_str = first.set_date.strftime("%b %d")
                     set_count = len(sets)
                     reps_str = "/".join(str(s.reps or 0) for s in sets)
                     if first.weight is not None:
@@ -113,19 +110,19 @@ async def build_coaching_context(
                     else:
                         line = f"- {date_str}: {set_count}x reps {reps_str} (bodyweight)"
 
-                    # Collect unique notes from this session's sets
-                    session_notes = list(dict.fromkeys(
+                    # Collect unique notes from this batch's sets
+                    batch_notes = list(dict.fromkeys(
                         s.notes for s in sets if s.notes
                     ))
-                    if session_notes:
-                        line += f" ({'; '.join(session_notes)})"
+                    if batch_notes:
+                        line += f" ({'; '.join(batch_notes)})"
                     ex_lines.append(line)
 
                 # PR: heaviest weight × reps
                 pr_sets = [s for s in recent_sets if s.weight is not None]
                 if pr_sets:
                     pr = max(pr_sets, key=lambda s: s.weight)
-                    pr_date = pr.session.date.strftime("%b %d") if pr.session else "?"
+                    pr_date = pr.set_date.strftime("%b %d")
                     ex_lines.append(
                         f"PR: {pr.weight} {pr.weight_unit} x {pr.reps} reps ({pr_date})"
                     )

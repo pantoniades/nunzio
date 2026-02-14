@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from typing import List
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     BigInteger,
@@ -14,6 +15,12 @@ from sqlalchemy import (
     Text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+NYC_TZ = ZoneInfo("America/New_York")
+
+
+def _now_nyc() -> datetime:
+    return datetime.now(NYC_TZ).replace(tzinfo=None)
 
 
 class Base(DeclarativeBase):
@@ -33,7 +40,7 @@ class Exercise(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     guidance: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
+        DateTime, nullable=False, default=_now_nyc
     )
 
     # Relationships
@@ -51,49 +58,15 @@ class Exercise(Base):
         return f"<Exercise(id={self.id}, name='{self.name}', muscle_group='{self.muscle_group}')>"
 
 
-class WorkoutSession(Base):
-    """Represents a workout session containing multiple sets."""
-
-    __tablename__ = "workout_sessions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    date: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
-    )
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
-
-    # Relationships
-    workout_sets: Mapped[List["WorkoutSet"]] = relationship(
-        "WorkoutSet", back_populates="session", cascade="all, delete-orphan"
-    )
-
-    # Indexes
-    __table_args__ = (
-        Index("idx_workout_sessions_date", "date"),
-        Index("idx_workout_sessions_created_at", "created_at"),
-        Index("idx_workout_sessions_user_id", "user_id"),
-    )
-
-    def __repr__(self) -> str:
-        return f"<WorkoutSession(id={self.id}, date='{self.date.isoformat()}')>"
-
-
 class WorkoutSet(Base):
-    """Represents a single set of an exercise within a workout session."""
+    """Represents a single set of an exercise. Flat model — no session indirection."""
 
     __tablename__ = "workout_sets"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("workout_sessions.id"), nullable=False
-    )
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    batch_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    set_date: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now_nyc)
     exercise_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("exercises.id"), nullable=False
     )
@@ -106,28 +79,27 @@ class WorkoutSet(Base):
     raw_exercise_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
+        DateTime, nullable=False, default=_now_nyc
     )
 
     # Relationships
-    session: Mapped["WorkoutSession"] = relationship(
-        "WorkoutSession", back_populates="workout_sets"
-    )
     exercise: Mapped["Exercise"] = relationship(
         "Exercise", back_populates="workout_sets"
     )
 
     # Indexes
     __table_args__ = (
-        Index("idx_workout_sets_session", "session_id"),
+        Index("idx_workout_sets_user_id", "user_id"),
+        Index("idx_workout_sets_batch_id", "batch_id"),
+        Index("idx_workout_sets_set_date", "set_date"),
         Index("idx_workout_sets_exercise", "exercise_id"),
-        Index("idx_workout_sets_session_exercise", "session_id", "exercise_id"),
+        Index("idx_workout_sets_user_batch", "user_id", "batch_id"),
     )
 
     def __repr__(self) -> str:
         weight_str = f"{self.weight} {self.weight_unit}" if self.weight is not None else "bodyweight"
         return (
-            f"<WorkoutSet(id={self.id}, session_id={self.session_id}, "
+            f"<WorkoutSet(id={self.id}, batch_id={self.batch_id}, "
             f"exercise_id={self.exercise_id}, set_number={self.set_number}, "
             f"reps={self.reps}, weight={weight_str})>"
         )
@@ -146,7 +118,7 @@ class MessageLog(Base):
     extracted_data: Mapped[str | None] = mapped_column(Text, nullable=True)
     response_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
+        DateTime, nullable=False, default=_now_nyc
     )
 
     __table_args__ = (

@@ -8,7 +8,7 @@ Two interfaces: interactive CLI for local use, Telegram bot for mobile (at the g
 
 - Natural language workout logging ("I did 3 sets of bench press at 185 lbs")
 - Cardio logging with duration and distance ("ran 3 miles in 25 minutes")
-- Undo/delete workouts ("undo", "delete last", "delete session #42")
+- Undo/delete workouts ("undo", "delete last", "delete #42")
 - Repeat last workout ("again", "repeat last")
 - Smart exercise matching — word-overlap scoring replaces naive substring search. Unknown exercises get created as-is instead of being force-mapped to the wrong catalog entry. Matched names show the mapping ("Dumbbell Flyes (from 'dumbbell fly')")
 - Context-aware coaching based on your actual workout history, exercise guidance, and training principles
@@ -113,15 +113,16 @@ python scripts/seed_exercises.py   # re-populates exercise catalog
 python scripts/seed_principles.py  # re-populates training principles
 ```
 
-### Upgrading from v0.2
+### Upgrading
 
-If you have an existing database, run the migration instead of recreating tables:
+If you have an existing database, run migrations instead of recreating tables:
 
 ```bash
-python scripts/migrate_v03.py
+python scripts/migrate_v03.py   # v0.2 → v0.3: adds raw_exercise_name + message_log
+python scripts/migrate_v05.py   # v0.3/v0.4 → v0.5: flattens sessions into sets
 ```
 
-This adds the `raw_exercise_name` column to `workout_sets` and creates the `message_log` table. Idempotent — safe to run multiple times.
+Both are idempotent — safe to run multiple times.
 
 ## Configuration
 
@@ -142,9 +143,9 @@ User message
   → LLM classify_intent() → UserIntent (intent, confidence, exercises, muscle groups)
   → Route by intent:
       log_workout   → extract_workout_data() → scored exercise matching → DB persist
-      view_stats    → query recent sessions + sets → format response
-      delete_workout → parse "undo"/"last"/session ID → DB delete with cascade
-      repeat_last   → get_latest_for_user() → clone session + sets
+      view_stats    → query recent sets by batch → format response
+      delete_workout → parse "undo"/"last"/batch ID → delete batch
+      repeat_last   → get_latest_batch_for_user() → clone sets with new batch_id
       coaching      → build_coaching_context() → generate_coaching_response()
   → Log to message_log table
   → Return response
@@ -170,7 +171,7 @@ The raw exercise name from the user is always preserved in `workout_sets.raw_exe
 1. Training principles by priority (top 6, plus cardio principle if relevant)
 2. Matched exercise details (from intent extraction)
 3. Per-exercise guidance text (from `exercises.guidance` column)
-4. Recent workout history per exercise (last 10 sets, grouped by session, with PR)
+4. Recent workout history per exercise (last 10 sets, grouped by batch, with PR)
 
 This gets injected into the user message alongside a coaching system prompt. The LLM generates free-text advice (NOT Instructor — raw completions).
 
@@ -185,8 +186,8 @@ src/nunzio/
 ├── main.py            # Thin wrapper for CLI
 ├── database/
 │   ├── connection.py  # Async SQLAlchemy engine + session manager
-│   ├── models.py      # Exercise, WorkoutSession, WorkoutSet, MessageLog, TrainingPrinciple
-│   └── repository.py  # Repository pattern: CRUD + scored search, latest-for-user, delete
+│   ├── models.py      # Exercise, WorkoutSet, MessageLog, TrainingPrinciple
+│   └── repository.py  # Repository pattern: CRUD + scored search, batch ops, delete
 └── llm/
     ├── client.py      # Ollama/Instructor: classify_intent, extract_workout_data, coaching
     ├── context.py     # Coaching context assembly (history, guidance, principles)
@@ -197,7 +198,8 @@ scripts/
 ├── seed_exercises.py    # Seed 29-exercise catalog
 ├── seed_principles.py   # Seed 9 training principles
 ├── clear_and_reseed.py  # Wipe data + reseed
-└── migrate_v03.py       # v0.3 migration (raw_exercise_name + message_log)
+├── migrate_v03.py       # v0.3 migration (raw_exercise_name + message_log)
+└── migrate_v05.py       # v0.5 migration (flatten sessions into sets)
 
 tests/
 ├── test_exercise_matching.py  # Unit: scoring function (no external deps)
@@ -214,8 +216,7 @@ tests/
 | Table | Key columns | Purpose |
 |-------|------------|---------|
 | `exercises` | name, muscle_group, guidance | Exercise catalog (29 seeded + ad-hoc) |
-| `workout_sessions` | user_id, date, notes | One per "I did X" message |
-| `workout_sets` | session_id, exercise_id, set_number, reps, weight, weight_unit, duration_minutes, distance, raw_exercise_name, notes | Individual sets within a session |
+| `workout_sets` | user_id, batch_id, set_date, exercise_id, set_number, reps, weight, weight_unit, duration_minutes, distance, raw_exercise_name, notes | Individual sets, grouped by batch_id per log message |
 | `training_principles` | category, title, content, priority | Coaching knowledge (9 seeded) |
 | `message_log` | user_id, raw_message, classified_intent, confidence, response_summary | Every interaction logged |
 
@@ -223,11 +224,11 @@ tests/
 
 - **Config**: `from nunzio.config import config` — pydantic-settings, env vars with `__` delimiter
 - **DB sessions**: `async with db_manager.get_session() as session:` — auto-commit/rollback
-- **Repositories**: `exercise_repo`, `workout_session_repo`, `workout_set_repo`, `message_log_repo`, `training_principle_repo`
+- **Repositories**: `exercise_repo`, `workout_set_repo`, `message_log_repo`, `training_principle_repo`
 - **LLM calls**: Instructor (JSON mode) for structured extraction, raw OpenAI client for coaching
 - **Retries**: tenacity with exponential backoff on LLM calls
-- **Two interfaces, shared core**: `MessageHandler` owns all logic. CLI is verbose (session IDs), bot is terse.
-- **User isolation**: `user_id` on every session/query. Telegram passes real user ID, CLI uses 0.
+- **Two interfaces, shared core**: `MessageHandler` owns all logic. CLI is verbose (batch IDs), bot is terse.
+- **User isolation**: `user_id` on every set/query. Telegram passes real user ID, CLI uses 0.
 
 ## Development
 

@@ -14,15 +14,16 @@ What works:
 - Exercise catalog seeded in DB (29 exercises across 8 muscle groups) with per-exercise coaching guidance
 - Training principles table (9 principles: progression, deload, rep ranges, volume, etc.)
 - Context-aware coaching: LLM gets the user's actual history, exercise guidance, and training principles injected into the prompt — gives specific prescriptions (sets/reps/weight) not generic advice
-- Per-user data isolation: `user_id` (BigInteger) on `WorkoutSession`, all queries filtered. Telegram passes real user ID, CLI uses `user_id=0`
-- Workout session + set persistence with Float weight + unit tracking
-- Stats view (recent sessions, total volume, set counts)
+- Per-user data isolation: `user_id` (BigInteger) on `WorkoutSet`, all queries filtered. Telegram passes real user ID, CLI uses `user_id=0`
+- Flat data model: no session table, sets have `user_id`, `batch_id`, `set_date` directly. `batch_id` groups sets from a single log message.
+- Timezone-aware dates: `set_date` stored in America/New_York via `zoneinfo`
+- Stats view (recent workouts, total volume, set counts)
 - Intent classification extracts mentioned exercises and muscle groups in the same LLM call
 - Telegram bot via long-polling (no port forwarding needed), with optional user ID restriction
 - `nunzio` (CLI) and `nunzio-bot` (Telegram) entry points via pyproject.toml
 - Containerfile for Podman deployment (runs the bot by default)
-- Delete/undo workouts: "undo", "delete last", "delete session #42" — routed via `delete_workout` intent
-- Repeat last workout: "again", "repeat last" — clones most recent session via `repeat_last` intent
+- Delete/undo workouts: "undo", "delete last", "delete #42" — routed via `delete_workout` intent
+- Repeat last workout: "again", "repeat last" — clones most recent batch via `repeat_last` intent
 - Scored exercise matching: word-overlap Jaccard replaces ILIKE `%query%`. Exact match → use it, score ≥ 0.5 → use it (show mapping), score < 0.5 → create ad-hoc exercise with user's exact name
 - Raw exercise name preserved: `workout_sets.raw_exercise_name` stores what the user actually said. Response shows mapping when names differ (e.g. `Dumbbell Flyes (from "dumbbell fly")`)
 - Set-level notes pass through from LLM extraction to DB
@@ -41,7 +42,7 @@ What works:
 1. Training principles by priority (top 6, plus cardio principle if relevant)
 2. Matched exercise details (fuzzy-matched from intent extraction)
 3. Per-exercise guidance text (from `exercises.guidance` column)
-4. Recent workout history per exercise (last 10 sets, grouped by session, with PR)
+4. Recent workout history per exercise (last 10 sets, grouped by batch_id, with PR)
 
 This context block is injected into the user message alongside a coaching system prompt. The LLM generates free-text advice (NOT Instructor — raw completions).
 
@@ -54,14 +55,14 @@ This context block is injected into the user message alongside a coaching system
 - **Structured extraction**: Instructor library (JSON mode) wrapping Ollama for Pydantic model output
 - **Container**: Podman via multi-stage Containerfile, runs `nunzio-bot` by default. Config via `--env-file`.
 
-## Schema Changes (requires create_tables.py + re-seed)
+## Schema (v0.5 — flat model)
 
-- `workout_sessions` table: added `user_id` BIGINT NOT NULL with index
-- `exercises` table: added `guidance` TEXT column
-- `workout_sets` table: `reps` now nullable, added `duration_minutes` INT, `distance` FLOAT, `raw_exercise_name` TEXT
-- New `training_principles` table: `category`, `title`, `content`, `priority`
-- New `message_log` table: `user_id`, `raw_message`, `classified_intent`, `confidence`, `extracted_data`, `response_summary`, `created_at`
-- v0.3 migration: `scripts/migrate_v03.py` (adds `raw_exercise_name` column + creates `message_log` table)
+- `workout_sets` table: `user_id` BIGINT, `batch_id` INT, `set_date` DATETIME (NYC tz), `exercise_id` FK, `set_number`, `reps` (nullable), `weight` FLOAT, `weight_unit`, `duration_minutes`, `distance`, `raw_exercise_name`, `notes`, `created_at`
+- `exercises` table: `name`, `muscle_group`, `description`, `guidance`, `created_at`
+- `training_principles` table: `category`, `title`, `content`, `priority`
+- `message_log` table: `user_id`, `raw_message`, `classified_intent`, `confidence`, `extracted_data`, `response_summary`, `created_at`
+- **Dropped**: `workout_sessions` table (v0.5 — flattened into workout_sets)
+- v0.5 migration: `scripts/migrate_v05.py` (backfills user_id/set_date/batch_id from sessions, drops session_id + workout_sessions)
 
 ## Development Discipline
 
@@ -77,6 +78,8 @@ This context block is injected into the user message alongside a coaching system
 - **Edit individual sets.** Delete/undo works at session level. Still no way to edit
   a single set within a session (change weight, fix reps). Could be "edit set #3 to 12 reps"
   or "change weight on last set to 40 lbs".
+- **Per-user timezone preferences.** Currently hardcoded to America/New_York. Needs a
+  `user_settings` table with `timezone` column. Defer until multi-user is actually needed.
 - **Specify Dates.**: Currently everything is "now". User should be able to specify
   "... yesterday" or "on Feb 24" and have the workout logged at the appropriate time.
 - **LLM serving backend (TBD)**: Currently using Ollama, but may switch. The LLM client

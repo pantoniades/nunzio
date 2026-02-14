@@ -5,7 +5,7 @@ import asyncio
 import sys
 
 from nunzio.database.connection import db_manager
-from nunzio.database.repository import exercise_repo, workout_session_repo, workout_set_repo
+from nunzio.database.repository import exercise_repo, workout_set_repo
 
 
 async def test_database():
@@ -25,11 +25,9 @@ async def test_database():
         # Test basic query operations
         async with db_manager.get_session() as session:
             exercises = await exercise_repo.get_multi(session, limit=5)
-            sessions = await workout_session_repo.get_multi(session, limit=5)
             sets = await workout_set_repo.get_multi(session, limit=5)
 
             print(f"Found {len(exercises)} exercises")
-            print(f"Found {len(sessions)} workout sessions")
             print(f"Found {len(sets)} workout sets")
 
             # Test create operation

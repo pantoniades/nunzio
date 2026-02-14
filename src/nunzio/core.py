@@ -2,10 +2,10 @@
 
 import re
 from collections import OrderedDict
-from datetime import datetime
 
 from .database.connection import db_manager
-from .database.repository import exercise_repo, message_log_repo, workout_session_repo, workout_set_repo
+from .database.models import _now_nyc
+from .database.repository import exercise_repo, message_log_repo, workout_set_repo
 from .llm.client import LLMClient
 from .llm.context import build_coaching_context
 
@@ -101,10 +101,8 @@ class MessageHandler:
                 defaulted_reps.add(i)
 
         async with db_manager.get_session() as session:
-            ws = await workout_session_repo.create(
-                session,
-                obj_in={"date": datetime.now(), "notes": message, "user_id": user_id},
-            )
+            batch_id = await workout_set_repo.get_next_batch_id(session, user_id)
+            now = _now_nyc()
 
             logged: list[str] = []
             for set_idx, ex_set in enumerate(workout_data.exercises):
@@ -134,7 +132,9 @@ class MessageHandler:
                 await workout_set_repo.create(
                     session,
                     obj_in={
-                        "session_id": ws.id,
+                        "user_id": user_id,
+                        "batch_id": batch_id,
+                        "set_date": now,
                         "exercise_id": exercise.id,
                         "set_number": ex_set.set_number,
                         "reps": ex_set.reps,
@@ -170,7 +170,7 @@ class MessageHandler:
                     line += f" — note: {ex_set.notes}"
                 logged.append(line)
 
-        header = f"Logged workout (session #{ws.id}):" if self._verbose else "Logged:"
+        header = f"Logged workout (#{batch_id}):" if self._verbose else "Logged:"
         lines = [header] + logged
         total_volume = sum(
             (s.weight or 0) * (s.reps or 0)
@@ -182,41 +182,41 @@ class MessageHandler:
         return "\n".join(lines)
 
     @staticmethod
-    def _parse_session_id(message: str) -> int | None:
-        """Extract a session ID from a message like 'delete session #42' or 'delete 42'."""
+    def _parse_workout_id(message: str) -> int | None:
+        """Extract a workout ID from a message like 'delete #42' or 'delete 42'."""
         match = re.search(r"#?(\d+)", message)
         if match:
             return int(match.group(1))
         return None
 
     async def _handle_delete_workout(self, message: str, user_id: int) -> str:
-        """Delete a workout session — 'undo'/'delete last' or by session ID."""
+        """Delete a workout — 'undo'/'delete last' or by batch ID."""
         msg_lower = message.lower()
         async with db_manager.get_session() as session:
             # "undo", "delete last", or no specific ID → delete most recent
             if any(word in msg_lower for word in ["undo", "last"]) or not re.search(r"\d+", message):
-                ws = await workout_session_repo.get_latest_for_user(session, user_id)
-                if not ws:
+                latest = await workout_set_repo.get_latest_batch_for_user(session, user_id)
+                if not latest:
                     return "Nothing to delete — no workouts found."
-                session_id = ws.id
+                batch_id = latest[0].batch_id
             else:
-                session_id = self._parse_session_id(message)
-                if not session_id:
-                    return "I couldn't figure out which session to delete. Try 'undo' or 'delete session #42'."
+                batch_id = self._parse_workout_id(message)
+                if not batch_id:
+                    return "I couldn't figure out which workout to delete. Try 'undo' or 'delete #42'."
 
-            deleted = await workout_session_repo.delete_session(session, session_id, user_id)
+            deleted = await workout_set_repo.delete_batch(session, batch_id, user_id)
             if not deleted:
-                return f"Session #{session_id} not found (or not yours)."
+                return f"Workout #{batch_id} not found (or not yours)."
 
             # Build confirmation showing what was deleted
             exercises: list[str] = []
-            for s in deleted.workout_sets:
+            for s in deleted:
                 name = s.exercise.name if s.exercise else f"exercise #{s.exercise_id}"
                 if name not in exercises:
                     exercises.append(name)
-            date_str = deleted.date.strftime("%b %d")
+            date_str = deleted[0].set_date.strftime("%b %-d")
             ex_str = ", ".join(exercises) if exercises else "no exercises"
-            return f"Deleted session #{deleted.id} ({date_str}): {ex_str} — {len(deleted.workout_sets)} sets removed."
+            return f"Deleted workout #{batch_id} ({date_str}): {ex_str} — {len(deleted)} sets removed."
 
     @staticmethod
     def _extract_repeat_note(message: str) -> str | None:
@@ -230,26 +230,26 @@ class MessageHandler:
         return stripped or None
 
     async def _handle_repeat_last(self, message: str, user_id: int) -> str:
-        """Repeat the user's most recent workout session."""
+        """Repeat the user's most recent workout."""
         new_note = self._extract_repeat_note(message)
 
         async with db_manager.get_session() as session:
-            last = await workout_session_repo.get_latest_for_user(session, user_id)
-            if not last or not last.workout_sets:
+            last_sets = await workout_set_repo.get_latest_batch_for_user(session, user_id)
+            if not last_sets:
                 return "Nothing to repeat — no previous workouts found."
 
-            # Create new session mirroring the old one
-            new_ws = await workout_session_repo.create(
-                session,
-                obj_in={"date": datetime.now(), "notes": f"Repeat of session #{last.id}", "user_id": user_id},
-            )
+            old_batch_id = last_sets[0].batch_id
+            new_batch_id = await workout_set_repo.get_next_batch_id(session, user_id)
+            now = _now_nyc()
 
             logged: list[str] = []
-            for old_set in sorted(last.workout_sets, key=lambda s: (s.exercise_id, s.set_number)):
+            for old_set in sorted(last_sets, key=lambda s: (s.exercise_id, s.set_number)):
                 await workout_set_repo.create(
                     session,
                     obj_in={
-                        "session_id": new_ws.id,
+                        "user_id": user_id,
+                        "batch_id": new_batch_id,
+                        "set_date": now,
                         "exercise_id": old_set.exercise_id,
                         "set_number": old_set.set_number,
                         "reps": old_set.reps,
@@ -257,7 +257,7 @@ class MessageHandler:
                         "weight_unit": old_set.weight_unit,
                         "duration_minutes": old_set.duration_minutes,
                         "distance": old_set.distance,
-                        "raw_exercise_name": old_set.raw_exercise_name if hasattr(old_set, "raw_exercise_name") else None,
+                        "raw_exercise_name": old_set.raw_exercise_name,
                         "notes": new_note,  # new note (if any), never carry over old
                     },
                 )
@@ -274,7 +274,7 @@ class MessageHandler:
                     line += f" — note: {new_note}"
                 logged.append(line)
 
-        header = f"Repeated session #{last.id} → new session #{new_ws.id}:" if self._verbose else "Repeated last workout:"
+        header = f"Repeated #{old_batch_id} → #{new_batch_id}:" if self._verbose else "Repeated last workout:"
         return "\n".join([header] + logged)
 
     @staticmethod
@@ -289,19 +289,22 @@ class MessageHandler:
 
     async def _handle_view_stats(self, user_id: int) -> str:
         async with db_manager.get_session() as session:
-            # Fetch up to 20 sessions, keep adding until >= 3 distinct days
-            all_sessions = await workout_session_repo.get_latest(session, user_id, limit=20)
+            # Fetch recent batches worth of sets
+            all_sets = await workout_set_repo.get_latest_batches(session, user_id, limit=20)
 
-            if not all_sessions:
+            if not all_sets:
                 return "No workouts logged yet. Tell me about a workout to get started!"
 
+            # Group sets by date, keep adding until >= 3 distinct days
             days: OrderedDict[str, list] = OrderedDict()
-            for ws in reversed(all_sessions):
-                date_key = ws.date.strftime("%a %b %-d")
-                sets = await workout_set_repo.get_by_session(session, ws.id)
-                days.setdefault(date_key, []).extend(sets)
-                if len(days) >= 3:
-                    break
+            # Sets come back ordered by batch_id desc — reverse to get chronological
+            for ws in reversed(all_sets):
+                date_key = ws.set_date.strftime("%a %b %-d")
+                days.setdefault(date_key, []).append(ws)
+
+            # Trim to last 3 days
+            while len(days) > 3:
+                days.popitem(last=False)
 
             lines: list[str] = []
             for i, (date_key, day_sets) in enumerate(days.items()):
@@ -353,17 +356,21 @@ class MessageHandler:
             return "\n".join(lines)
 
     async def _handle_list_workouts(self, user_id: int) -> str:
-        """Show last 10 sessions with IDs for use with delete."""
+        """Show last 10 workouts with batch IDs for use with delete."""
         async with db_manager.get_session() as session:
-            sessions = await workout_session_repo.get_latest(session, user_id, limit=10)
+            all_sets = await workout_set_repo.get_latest_batches(session, user_id, limit=10)
 
-            if not sessions:
+            if not all_sets:
                 return "No workouts logged yet."
 
+            # Group by batch_id (already ordered by batch_id desc)
+            batches: OrderedDict[int, list] = OrderedDict()
+            for s in all_sets:
+                batches.setdefault(s.batch_id, []).append(s)
+
             lines: list[str] = []
-            for ws in sessions:
-                sets = await workout_set_repo.get_by_session(session, ws.id)
-                date_str = ws.date.strftime("%b %-d")
+            for batch_id, sets in batches.items():
+                date_str = sets[0].set_date.strftime("%b %-d")
 
                 # Collect unique exercise names preserving order
                 ex_names: list[str] = []
@@ -375,7 +382,7 @@ class MessageHandler:
                 n = len(sets)
                 set_word = "set" if n == 1 else "sets"
                 ex_str = ", ".join(ex_names) if ex_names else "no exercises"
-                lines.append(f"#{ws.id}  {date_str}  {ex_str} ({n} {set_word})")
+                lines.append(f"#{batch_id}  {date_str}  {ex_str} ({n} {set_word})")
 
             return "\n".join(lines)
 

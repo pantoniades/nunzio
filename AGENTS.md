@@ -25,6 +25,7 @@ python scripts/seed_exercises.py   # seed exercise catalog
 python scripts/seed_principles.py  # seed training principles
 python scripts/clear_and_reseed.py # wipe data + reseed
 python scripts/migrate_v03.py      # v0.3 migration (additive, idempotent)
+python scripts/migrate_v05.py      # v0.5 migration (flatten sessions into sets)
 ```
 
 ## Project Structure
@@ -38,8 +39,8 @@ src/nunzio/
 ├── main.py            # Thin wrapper → cli.main()
 ├── database/
 │   ├── connection.py  # Async engine + session manager
-│   ├── models.py      # SQLAlchemy models (Exercise, WorkoutSession, WorkoutSet, MessageLog, TrainingPrinciple)
-│   └── repository.py  # Repository pattern CRUD + scored search, latest-for-user, delete
+│   ├── models.py      # SQLAlchemy models (Exercise, WorkoutSet, MessageLog, TrainingPrinciple)
+│   └── repository.py  # Repository pattern CRUD + scored search, batch ops, delete
 └── llm/
     ├── client.py      # Ollama/Instructor: classify_intent, extract_workout_data, coaching
     ├── context.py     # Coaching context assembly (history, guidance, principles)
@@ -62,7 +63,7 @@ tests/                 # Unit + integration tests
 
 - **Config**: `from nunzio.config import config` — pydantic-settings, env vars with `__` delimiter
 - **DB sessions**: `async with db_manager.get_session() as session:`
-- **Repositories**: `exercise_repo`, `workout_session_repo`, `workout_set_repo`, `message_log_repo`, `training_principle_repo`
+- **Repositories**: `exercise_repo`, `workout_set_repo`, `message_log_repo`, `training_principle_repo`
 - **LLM**: `LLMClient.classify_intent()` → `UserIntent`, `LLMClient.extract_workout_data()` → `WorkoutData`, `LLMClient.generate_coaching_response()` → str
 - **Retries**: tenacity with exponential backoff on LLM calls
 - **Weight storage**: Float column + weight_unit string (lbs/kg), stored as-is from user input

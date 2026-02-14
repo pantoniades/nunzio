@@ -21,18 +21,18 @@ async def test_repeat_no_history(handler: MessageHandler):
 
 
 @pytest.mark.asyncio
-async def test_repeat_last_session(handler: MessageHandler):
-    """Log a workout, repeat it, verify the new session matches."""
+async def test_repeat_last_workout(handler: MessageHandler):
+    """Log a workout, repeat it, verify the new workout matches."""
     # Log original
     response = await handler.process("did 2 sets of bench press 10 reps at 135 lbs", user_id=55555)
     assert "Logged" in response
 
     # Repeat
     response = await handler.process("repeat last", user_id=55555)
-    assert "Repeated session" in response or "Repeated last" in response
+    assert "Repeated #" in response
     # Should mention bench press
     assert "Bench Press" in response or "bench press" in response.lower()
 
-    # Clean up both sessions
+    # Clean up both workouts
     await handler.process("undo", user_id=55555)
     await handler.process("undo", user_id=55555)

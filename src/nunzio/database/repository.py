@@ -2,11 +2,11 @@
 
 from typing import Generic, List, Optional, Type, TypeVar, Union
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .models import Base, Exercise, MessageLog, TrainingPrinciple, WorkoutSession, WorkoutSet
+from .models import Base, Exercise, MessageLog, TrainingPrinciple, WorkoutSet
 
 ModelType = TypeVar("ModelType", bound=Base)
 CreateSchemaType = TypeVar("CreateSchemaType")
@@ -151,119 +151,93 @@ class ExerciseRepository(BaseRepository[Exercise, dict, dict]):
         return scored
 
 
-class WorkoutSessionRepository(BaseRepository[WorkoutSession, dict, dict]):
-    """Repository for WorkoutSession operations."""
-
-    async def get_with_sets(
-        self, session: AsyncSession, id: int
-    ) -> Optional[WorkoutSession]:
-        """Get a workout session with all its sets."""
-        stmt = (
-            select(WorkoutSession)
-            .options(selectinload(WorkoutSession.workout_sets))
-            .where(WorkoutSession.id == id)
-        )
-        result = await session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def get_by_date_range(
-        self,
-        session: AsyncSession,
-        user_id: int,
-        *,
-        start_date: str,
-        end_date: str,
-        skip: int = 0,
-        limit: int = 100,
-    ) -> List[WorkoutSession]:
-        """Get workout sessions within a date range."""
-        stmt = (
-            select(WorkoutSession)
-            .where(WorkoutSession.user_id == user_id)
-            .where(WorkoutSession.date >= start_date)
-            .where(WorkoutSession.date <= end_date)
-            .order_by(WorkoutSession.date.desc())
-            .offset(skip)
-            .limit(limit)
-        )
-        result = await session.execute(stmt)
-        return list(result.scalars().all())
-
-    async def get_latest(
-        self, session: AsyncSession, user_id: int, *, limit: int = 10
-    ) -> List[WorkoutSession]:
-        """Get the most recent workout sessions for a user."""
-        stmt = (
-            select(WorkoutSession)
-            .where(WorkoutSession.user_id == user_id)
-            .order_by(WorkoutSession.date.desc())
-            .limit(limit)
-        )
-        result = await session.execute(stmt)
-        return list(result.scalars().all())
-
-    async def get_latest_for_user(
-        self, session: AsyncSession, user_id: int
-    ) -> Optional[WorkoutSession]:
-        """Get the most recent session for a user with sets + exercises eagerly loaded."""
-        stmt = (
-            select(WorkoutSession)
-            .options(
-                selectinload(WorkoutSession.workout_sets).selectinload(WorkoutSet.exercise)
-            )
-            .where(WorkoutSession.user_id == user_id)
-            .order_by(WorkoutSession.date.desc())
-            .limit(1)
-        )
-        result = await session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def delete_session(
-        self, session: AsyncSession, session_id: int, user_id: int
-    ) -> Optional[WorkoutSession]:
-        """Delete a session only if owned by user_id. Returns deleted session for confirmation."""
-        stmt = (
-            select(WorkoutSession)
-            .options(
-                selectinload(WorkoutSession.workout_sets).selectinload(WorkoutSet.exercise)
-            )
-            .where(WorkoutSession.id == session_id)
-            .where(WorkoutSession.user_id == user_id)
-        )
-        result = await session.execute(stmt)
-        ws = result.scalar_one_or_none()
-        if ws:
-            await session.delete(ws)
-            await session.flush()
-        return ws
-
-
 class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
     """Repository for WorkoutSet operations."""
+
+    async def get_next_batch_id(self, session: AsyncSession, user_id: int) -> int:
+        """Get the next batch_id for a user (max + 1, or 1 if none exist)."""
+        stmt = select(func.max(WorkoutSet.batch_id)).where(
+            WorkoutSet.user_id == user_id
+        )
+        result = await session.execute(stmt)
+        current_max = result.scalar_one_or_none()
+        return (current_max or 0) + 1
+
+    async def get_latest_batch_for_user(
+        self, session: AsyncSession, user_id: int
+    ) -> List[WorkoutSet]:
+        """Get all sets from the user's most recent batch, with exercise eagerly loaded."""
+        # First get the latest batch_id
+        sub = (
+            select(func.max(WorkoutSet.batch_id))
+            .where(WorkoutSet.user_id == user_id)
+            .scalar_subquery()
+        )
+        stmt = (
+            select(WorkoutSet)
+            .options(selectinload(WorkoutSet.exercise))
+            .where(WorkoutSet.user_id == user_id)
+            .where(WorkoutSet.batch_id == sub)
+            .order_by(WorkoutSet.set_number)
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def delete_batch(
+        self, session: AsyncSession, batch_id: int, user_id: int
+    ) -> List[WorkoutSet]:
+        """Delete all sets with the given batch_id owned by user. Returns sets before deletion."""
+        # Fetch first (with exercises) so we can return details
+        stmt = (
+            select(WorkoutSet)
+            .options(selectinload(WorkoutSet.exercise))
+            .where(WorkoutSet.batch_id == batch_id)
+            .where(WorkoutSet.user_id == user_id)
+        )
+        result = await session.execute(stmt)
+        sets = list(result.scalars().all())
+        if sets:
+            del_stmt = (
+                delete(WorkoutSet)
+                .where(WorkoutSet.batch_id == batch_id)
+                .where(WorkoutSet.user_id == user_id)
+            )
+            await session.execute(del_stmt)
+            await session.flush()
+        return sets
+
+    async def get_latest_batches(
+        self, session: AsyncSession, user_id: int, *, limit: int = 10
+    ) -> List[WorkoutSet]:
+        """Get sets from the N most recent batches for list_workouts, ordered by batch_id desc."""
+        # Get the N most recent distinct batch_ids
+        batch_sub = (
+            select(WorkoutSet.batch_id)
+            .where(WorkoutSet.user_id == user_id)
+            .group_by(WorkoutSet.batch_id)
+            .order_by(WorkoutSet.batch_id.desc())
+            .limit(limit)
+            .subquery()
+        )
+        stmt = (
+            select(WorkoutSet)
+            .options(selectinload(WorkoutSet.exercise))
+            .where(WorkoutSet.user_id == user_id)
+            .where(WorkoutSet.batch_id.in_(select(batch_sub.c.batch_id)))
+            .order_by(WorkoutSet.batch_id.desc(), WorkoutSet.set_number)
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
 
     async def get_by_user(
         self, session: AsyncSession, user_id: int, *, limit: int = 1000
     ) -> List[WorkoutSet]:
-        """Get all sets for a user (via their sessions)."""
+        """Get all sets for a user."""
         stmt = (
             select(WorkoutSet)
-            .join(WorkoutSession)
-            .where(WorkoutSession.user_id == user_id)
+            .where(WorkoutSet.user_id == user_id)
             .order_by(WorkoutSet.created_at.desc())
             .limit(limit)
-        )
-        result = await session.execute(stmt)
-        return list(result.scalars().all())
-
-    async def get_by_session(
-        self, session: AsyncSession, session_id: int
-    ) -> List[WorkoutSet]:
-        """Get all sets for a specific workout session."""
-        stmt = (
-            select(WorkoutSet)
-            .options(selectinload(WorkoutSet.exercise))
-            .where(WorkoutSet.session_id == session_id)
-            .order_by(WorkoutSet.set_number)
         )
         result = await session.execute(stmt)
         return list(result.scalars().all())
@@ -274,10 +248,8 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
         """Get sets for a specific exercise for a user."""
         stmt = (
             select(WorkoutSet)
-            .join(WorkoutSession)
-            .options(selectinload(WorkoutSet.session))
             .where(WorkoutSet.exercise_id == exercise_id)
-            .where(WorkoutSession.user_id == user_id)
+            .where(WorkoutSet.user_id == user_id)
             .order_by(WorkoutSet.created_at.desc())
             .limit(limit)
         )
@@ -290,10 +262,8 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
         """Get personal records for an exercise (by weight) for a user."""
         stmt = (
             select(WorkoutSet)
-            .join(WorkoutSession)
-            .options(selectinload(WorkoutSet.session))
             .where(WorkoutSet.exercise_id == exercise_id)
-            .where(WorkoutSession.user_id == user_id)
+            .where(WorkoutSet.user_id == user_id)
             .where(WorkoutSet.weight.isnot(None))
             .order_by(WorkoutSet.weight.desc())
             .limit(limit)
@@ -345,7 +315,6 @@ class MessageLogRepository(BaseRepository[MessageLog, dict, dict]):
 
 # Repository instances
 exercise_repo = ExerciseRepository(Exercise)
-workout_session_repo = WorkoutSessionRepository(WorkoutSession)
 workout_set_repo = WorkoutSetRepository(WorkoutSet)
 training_principle_repo = TrainingPrincipleRepository(TrainingPrinciple)
 message_log_repo = MessageLogRepository(MessageLog)

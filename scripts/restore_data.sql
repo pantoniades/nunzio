@@ -1,0 +1,30 @@
+-- Restore data script for v0.5 migration.
+-- Run this AFTER create_tables.py if you need to recreate from scratch.
+-- Generates INSERT statements by joining old workout_sessions + workout_sets.
+--
+-- To generate this for your actual data, run before migration:
+--
+--   SELECT CONCAT(
+--     'INSERT INTO workout_sets (user_id, batch_id, set_date, exercise_id, set_number, ',
+--     'reps, weight, weight_unit, duration_minutes, distance, raw_exercise_name, notes, created_at) VALUES (',
+--     s.user_id, ', ',
+--     s.id, ', ',
+--     '''', s.date, ''', ',
+--     ws.exercise_id, ', ',
+--     ws.set_number, ', ',
+--     IFNULL(ws.reps, 'NULL'), ', ',
+--     IFNULL(ws.weight, 'NULL'), ', ',
+--     '''', ws.weight_unit, ''', ',
+--     IFNULL(ws.duration_minutes, 'NULL'), ', ',
+--     IFNULL(ws.distance, 'NULL'), ', ',
+--     IFNULL(CONCAT('''', REPLACE(ws.raw_exercise_name, '''', ''''''), ''''), 'NULL'), ', ',
+--     IFNULL(CONCAT('''', REPLACE(ws.notes, '''', ''''''), ''''), 'NULL'), ', ',
+--     '''', ws.created_at, '''',
+--     ');'
+--   ) AS insert_stmt
+--   FROM workout_sets ws
+--   JOIN workout_sessions s ON ws.session_id = s.id
+--   ORDER BY s.user_id, s.date, ws.set_number;
+--
+-- The migrate_v05.py script handles this automatically via UPDATE + backfill.
+-- This file exists as a safety net if you need to nuke and rebuild.
