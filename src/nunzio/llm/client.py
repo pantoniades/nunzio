@@ -48,6 +48,7 @@ class LLMClient:
         POSSIBLE INTENTS:
         - log_workout: User is reporting a workout they already did (past tense: "I did", "I benched", etc.)
         - view_stats: User wants to see their workout history or statistics
+        - list_workouts: User wants to see a list of recent workout sessions with IDs ("last workouts", "list workouts", "list sessions", "show sessions")
         - delete_workout: User wants to undo, delete, or remove a logged workout ("undo", "delete last", "remove session #42", "that's wrong")
         - repeat_last: User wants to log the same workout again ("again", "repeat last", "same as last time")
         - coaching: User wants advice, recommendations, questions about training, or anything else
@@ -87,6 +88,11 @@ class LLMClient:
                 for word in ["log", "did", "worked out", "i benched", "sets", "reps"]
             ):
                 return UserIntent(intent="log_workout", confidence=0.6)
+            elif any(
+                phrase in message_lower
+                for phrase in ["last workouts", "list workouts", "list sessions", "show sessions"]
+            ):
+                return UserIntent(intent="list_workouts", confidence=0.9)
             elif any(
                 word in message_lower
                 for word in ["stats", "progress", "history", "show"]

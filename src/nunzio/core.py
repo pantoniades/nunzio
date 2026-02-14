@@ -1,6 +1,7 @@
 """Core message processing — shared by CLI and Telegram bot."""
 
 import re
+from collections import OrderedDict
 from datetime import datetime
 
 from .database.connection import db_manager
@@ -32,6 +33,8 @@ class MessageHandler:
             response = await self._handle_log_workout(message, user_id)
         elif intent.intent == "view_stats":
             response = await self._handle_view_stats(user_id)
+        elif intent.intent == "list_workouts":
+            response = await self._handle_list_workouts(user_id)
         elif intent.intent == "delete_workout":
             response = await self._handle_delete_workout(message, user_id)
         elif intent.intent == "repeat_last":
@@ -274,40 +277,105 @@ class MessageHandler:
         header = f"Repeated session #{last.id} → new session #{new_ws.id}:" if self._verbose else "Repeated last workout:"
         return "\n".join([header] + logged)
 
+    @staticmethod
+    def _fmt_weight(w: float | None, unit: str) -> str:
+        """Format weight: drop .0, omit unit when lbs."""
+        if w is None:
+            return "bodyweight"
+        w_str = f"{w:g}"
+        if unit and unit != "lbs":
+            return f"{w_str} {unit}"
+        return w_str
+
     async def _handle_view_stats(self, user_id: int) -> str:
         async with db_manager.get_session() as session:
-            sessions = await workout_session_repo.get_latest(session, user_id, limit=5)
-            all_sets = await workout_set_repo.get_by_user(session, user_id, limit=1000)
+            # Fetch up to 20 sessions, keep adding until >= 3 distinct days
+            all_sessions = await workout_session_repo.get_latest(session, user_id, limit=20)
 
-            if not sessions:
+            if not all_sessions:
                 return "No workouts logged yet. Tell me about a workout to get started!"
 
-            total_volume = sum((s.weight or 0) * (s.reps or 0) for s in all_sets)
-            lines = [
-                "Workout Stats:",
-                f"  Sessions: {len(sessions)} (recent)",
-                f"  Total sets: {len(all_sets)}",
-                f"  Total volume: {total_volume:.0f} lbs",
-                "",
-                "Recent:",
-            ]
-            for ws in sessions[:5]:
+            days: OrderedDict[str, list] = OrderedDict()
+            for ws in reversed(all_sessions):
+                date_key = ws.date.strftime("%a %b %-d")
                 sets = await workout_set_repo.get_by_session(session, ws.id)
-                exercise_names: list[str] = []
+                days.setdefault(date_key, []).extend(sets)
+                if len(days) >= 3:
+                    break
+
+            lines: list[str] = []
+            for i, (date_key, day_sets) in enumerate(days.items()):
+                if i > 0:
+                    lines.append("")
+                lines.append(date_key)
+
+                # Group sets by exercise, preserving first-appearance order
+                exercises: OrderedDict[int, list] = OrderedDict()
+                for s in day_sets:
+                    exercises.setdefault(s.exercise_id, []).append(s)
+
+                for ex_id, ex_sets in exercises.items():
+                    first = ex_sets[0]
+                    name = first.exercise.name if first.exercise else f"exercise #{ex_id}"
+
+                    # Cardio
+                    if first.duration_minutes:
+                        parts = [f"{first.duration_minutes} min"]
+                        if first.distance:
+                            d_str = f"{first.distance:g}"
+                            parts.append(f"{d_str} mi")
+                        lines.append(f"  {name} \u2014 {', '.join(parts)}")
+                        continue
+
+                    # Strength — check if all sets are identical (same reps + weight)
+                    all_same = all(
+                        s.reps == first.reps and s.weight == first.weight
+                        for s in ex_sets
+                    )
+
+                    if all_same and first.weight is not None:
+                        w_str = self._fmt_weight(first.weight, first.weight_unit)
+                        lines.append(f"  {name} \u2014 {len(ex_sets)}x{first.reps} @ {w_str}")
+                    elif all_same and first.weight is None:
+                        lines.append(f"  {name} \u2014 {len(ex_sets)}x{first.reps}")
+                    else:
+                        # Mixed sets
+                        set_strs: list[str] = []
+                        for s in ex_sets:
+                            r = s.reps or 0
+                            if s.weight is not None:
+                                w_str = self._fmt_weight(s.weight, s.weight_unit)
+                                set_strs.append(f"{r}x{w_str}")
+                            else:
+                                set_strs.append(f"{r} reps")
+                        lines.append(f"  {name} \u2014 {' / '.join(set_strs)}")
+
+            return "\n".join(lines)
+
+    async def _handle_list_workouts(self, user_id: int) -> str:
+        """Show last 10 sessions with IDs for use with delete."""
+        async with db_manager.get_session() as session:
+            sessions = await workout_session_repo.get_latest(session, user_id, limit=10)
+
+            if not sessions:
+                return "No workouts logged yet."
+
+            lines: list[str] = []
+            for ws in sessions:
+                sets = await workout_set_repo.get_by_session(session, ws.id)
+                date_str = ws.date.strftime("%b %-d")
+
+                # Collect unique exercise names preserving order
+                ex_names: list[str] = []
                 for s in sets:
                     name = s.exercise.name if s.exercise else f"exercise #{s.exercise_id}"
-                    if name not in exercise_names:
-                        exercise_names.append(name)
-                date_str = ws.date.strftime("%b %d")
-                exercises_str = (
-                    ", ".join(exercise_names) if exercise_names else "no exercises"
-                )
-                if self._verbose:
-                    lines.append(
-                        f"  #{ws.id} ({date_str}): {exercises_str} - {len(sets)} sets"
-                    )
-                else:
-                    lines.append(f"  {date_str}: {exercises_str} ({len(sets)} sets)")
+                    if name not in ex_names:
+                        ex_names.append(name)
+
+                n = len(sets)
+                set_word = "set" if n == 1 else "sets"
+                ex_str = ", ".join(ex_names) if ex_names else "no exercises"
+                lines.append(f"#{ws.id}  {date_str}  {ex_str} ({n} {set_word})")
 
             return "\n".join(lines)
 

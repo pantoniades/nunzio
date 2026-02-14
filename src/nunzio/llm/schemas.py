@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 class UserIntent(BaseModel):
     """User intent classification with exercise/muscle group extraction."""
-    intent: Literal["log_workout", "view_stats", "coaching", "delete_workout", "repeat_last"] = Field(
+    intent: Literal["log_workout", "view_stats", "list_workouts", "coaching", "delete_workout", "repeat_last"] = Field(
         description="Primary user intention"
     )
     confidence: float = Field(
