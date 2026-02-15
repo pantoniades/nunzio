@@ -17,7 +17,9 @@ What works:
 - Per-user data isolation: `user_id` (BigInteger) on `WorkoutSet`, all queries filtered. Telegram passes real user ID, CLI uses `user_id=0`
 - Flat data model: no session table, sets have `user_id`, `batch_id`, `set_date` directly. `batch_id` groups sets from a single log message.
 - Timezone-aware dates: `set_date` stored in America/New_York via `zoneinfo`
-- Stats view (recent workouts, total volume, set counts)
+- Stats view with sub-types: overview (last 3 days), PRs (heaviest per exercise), exercise history, weekly volume trends, consistency (streak, frequency, avg gap)
+- Log response personality: heuristic one-liner after logging (new PR, first time, back after gap, weight increase, pain warning). Pure code, no LLM call.
+- Proper logging: `logging.getLogger(__name__)` across all modules. CLI and bot configure via `config.logging.level`.
 - Intent classification extracts mentioned exercises and muscle groups in the same LLM call
 - Telegram bot via long-polling (no port forwarding needed), with optional user ID restriction
 - `nunzio` (CLI) and `nunzio-bot` (Telegram) entry points via pyproject.toml
@@ -36,7 +38,7 @@ What works:
 
 **Two interfaces, shared core** — `core.MessageHandler` owns all message processing logic. The CLI (`cli.py`) and Telegram bot (`bot.py`) are thin wrappers. The handler takes a `verbose` flag: CLI gets session IDs and debug detail, the bot gets cleaner output.
 
-**Intent routing** — 5 intents: `log_workout`, `view_stats`, `coaching` (catch-all), `delete_workout`, `repeat_last`.
+**Intent routing** — 5 intents: `log_workout`, `view_stats`, `coaching` (catch-all), `delete_workout`, `repeat_last`. `view_stats` sub-routes by `stats_type` field on `UserIntent`: overview (default), prs, exercise_history, volume, consistency.
 
 **Coaching pipeline** — `build_coaching_context()` in `llm/context.py` assembles:
 1. Training principles by priority (top 6, plus cardio principle if relevant)
@@ -89,11 +91,11 @@ This context block is injected into the user message alongside a coaching system
   OpenAI-compatible API. The `ollama` pip package is still in deps but unused at runtime.
 - **Web search for recommendations**: Let Nunzio search the web to give better, more
   contextual workout suggestions instead of just listing exercises from the DB.
-- **Personality on log responses.** When logging a workout, Nunzio could add a brief
-  context-aware comment based on the notes and history. E.g. if notes say "difficult set"
-  → "Great job getting through it"; if the user jumped in weight → "Scale back if you
-  feel pain". Needs a lightweight LLM call (or heuristic) after the log is saved, appended
-  to the confirmation message. Keep it one line, not an essay.
+- ~~**Personality on log responses.**~~ **Done (v0.5).** Heuristic one-liners after
+  logging: new PR, first time, back after gap, weight increase, pain warning. Pure code
+  via `_generate_log_comment()`. Future: multiple phrasings per heuristic, lightweight
+  LLM call for real personality, tone configuration (encouraging/blunt/sarcastic),
+  multi-session trend awareness.
 - **Proactive check-ins (cron).** Nunzio should reach out unprompted via Telegram:
   congratulate when a session shows upward trends (new PR, volume increase, consistency
   streak), and nudge if the user hasn't logged a workout in N days. Needs a scheduled
@@ -113,6 +115,8 @@ This context block is injected into the user message alongside a coaching system
   a new intent in classification (e.g. `log_weight`), a simple extraction model, and a
   way to view history ("what's my weight trend?"). Could tie into coaching context too —
   the LLM knowing the user's weight trend is useful for advice.
-- Richer stats (PRs, volume trends, per-exercise history)
+- ~~Richer stats (PRs, volume trends, per-exercise history)~~ **Done (v0.5).** `view_stats`
+  sub-routes by `stats_type`. PRs, exercise history, weekly volume by muscle group,
+  consistency metrics (streak, avg gap, 30/90-day counts).
 - Conversation context / multi-turn workout logging
 - Proper test coverage with mocked LLM/DB (current tests hit real services)

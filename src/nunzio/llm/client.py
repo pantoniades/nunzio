@@ -1,5 +1,6 @@
 """Async Ollama client with Instructor integration for structured data extraction."""
 
+import logging
 from typing import Optional
 
 import instructor
@@ -11,6 +12,8 @@ from .schemas import (
     UserIntent,
     WorkoutData,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -53,11 +56,18 @@ class LLMClient:
         - repeat_last: User wants to log the same workout again ("again", "repeat last", "same as last time")
         - coaching: User wants advice, recommendations, questions about training, or anything else
 
+        For view_stats intent, also classify the stats_type:
+        - "prs": User wants personal records ("show my PRs", "what are my best lifts")
+        - "exercise_history": User asks about a specific exercise's history ("bench press history", "how has my squat been")
+        - "volume": User asks about training volume ("how much volume this week", "weekly volume")
+        - "consistency": User asks about workout frequency/consistency ("how consistent am I", "how often do I work out", "workout streak")
+        - "overview": General stats request or anything else ("show my stats", "how have my workouts been")
+
         Also extract any exercise names and muscle groups mentioned in the message.
         Exercise names should match common names like "Bench Press", "Squat", "Deadlift", etc.
         Muscle groups should match: chest, back, shoulders, legs, biceps, triceps, core, cardio, flexibility.
 
-        Return the intent, confidence score, any mentioned exercises, and any mentioned muscle groups.
+        Return the intent, confidence score, stats_type (only for view_stats), any mentioned exercises, and any mentioned muscle groups.
         """
 
         try:
@@ -71,6 +81,7 @@ class LLMClient:
             return result
 
         except Exception:
+            logger.warning("LLM classification failed, using keyword fallback", exc_info=True)
             # Fallback classification
             message_lower = message.lower()
             if any(
@@ -154,8 +165,8 @@ class LLMClient:
                 return result
             return None
 
-        except Exception as e:
-            print(f"Workout extraction failed: {e}")
+        except Exception:
+            logger.error("Workout extraction failed", exc_info=True)
             return None
 
     async def generate_coaching_response(self, message: str, context: str) -> str:
@@ -195,6 +206,7 @@ class LLMClient:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
+            logger.error("Coaching response generation failed", exc_info=True)
             return f"Sorry, I couldn't generate a response right now. ({e})"
 
     async def close(self) -> None:

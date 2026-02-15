@@ -3,7 +3,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class DatabaseConfig(BaseModel):
@@ -65,10 +65,11 @@ class Config(BaseSettings):
         default="development", description="Application environment"
     )
 
-    class Config:
-        env_nested_delimiter = "__"
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = SettingsConfigDict(
+        env_nested_delimiter="__",
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
 
 
 # Global configuration instance

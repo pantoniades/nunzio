@@ -62,7 +62,7 @@ class NunzioBot:
 
     def run(self) -> None:
         if not config.telegram.token:
-            print("TELEGRAM__TOKEN not set in .env")
+            logger.error("TELEGRAM__TOKEN not set in .env")
             sys.exit(1)
 
         app = (

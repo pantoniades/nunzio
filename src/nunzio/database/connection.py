@@ -1,5 +1,6 @@
 """Database connection management for async SQLAlchemy."""
 
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -11,6 +12,8 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from ..config import config
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
@@ -74,6 +77,7 @@ class DatabaseManager:
                 await conn.execute(text("SELECT 1"))
             return True
         except Exception:
+            logger.warning("Health check failed", exc_info=True)
             return False
 
 

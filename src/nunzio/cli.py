@@ -1,9 +1,13 @@
 """Interactive CLI for Nunzio workout assistant."""
 
 import asyncio
+import logging
 import sys
 
+from .config import config
 from .core import MessageHandler
+
+logger = logging.getLogger(__name__)
 
 CLI_USER_ID = 0
 
@@ -40,8 +44,8 @@ class NunzioCLI:
             except (KeyboardInterrupt, EOFError):
                 print("\nGoodbye!")
                 break
-            except Exception as e:
-                print(f"Error: {e}")
+            except Exception:
+                logger.exception("Error processing message")
                 continue
 
         await self._handler.close()
@@ -74,6 +78,10 @@ async def main() -> None:
 
 def main_sync() -> None:
     """Entry point for pyproject.toml console_scripts."""
+    logging.basicConfig(
+        level=config.logging.level,
+        format=config.logging.format,
+    )
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

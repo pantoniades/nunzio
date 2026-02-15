@@ -1,13 +1,17 @@
 """Core message processing — shared by CLI and Telegram bot."""
 
+import logging
 import re
 from collections import OrderedDict
+from datetime import date as date_type, datetime, timedelta
 
 from .database.connection import db_manager
 from .database.models import _now_nyc
 from .database.repository import exercise_repo, message_log_repo, workout_set_repo
 from .llm.client import LLMClient
 from .llm.context import build_coaching_context
+
+logger = logging.getLogger(__name__)
 
 
 class MessageHandler:
@@ -32,7 +36,7 @@ class MessageHandler:
         if intent.intent == "log_workout" and intent.confidence > 0.5:
             response = await self._handle_log_workout(message, user_id)
         elif intent.intent == "view_stats":
-            response = await self._handle_view_stats(user_id)
+            response = await self._handle_view_stats(intent, user_id)
         elif intent.intent == "list_workouts":
             response = await self._handle_list_workouts(user_id)
         elif intent.intent == "delete_workout":
@@ -57,7 +61,7 @@ class MessageHandler:
                     },
                 )
         except Exception:
-            pass
+            logger.warning("Message logging failed", exc_info=True)
 
         return response
 
@@ -105,6 +109,8 @@ class MessageHandler:
             now = _now_nyc()
 
             logged: list[str] = []
+            logged_set_data: list[dict] = []
+            history: list = []
             for set_idx, ex_set in enumerate(workout_data.exercises):
                 raw_name = ex_set.exercise_name
                 matched_differently = False
@@ -169,6 +175,22 @@ class MessageHandler:
                 if ex_set.notes:
                     line += f" — note: {ex_set.notes}"
                 logged.append(line)
+                logged_set_data.append({
+                    "exercise_id": exercise.id,
+                    "name": exercise.name,
+                    "weight": ex_set.weight,
+                    "reps": ex_set.reps,
+                    "notes": ex_set.notes,
+                    "is_cardio": bool(ex_set.duration_minutes),
+                })
+
+            # Query history for personality comment
+            exercise_ids = list({d["exercise_id"] for d in logged_set_data})
+            history = await workout_set_repo.get_recent_for_exercises(
+                session, exercise_ids, user_id, exclude_batch=batch_id
+            )
+
+        comment = self._generate_log_comment(logged_set_data, history, now)
 
         header = f"Logged workout (#{batch_id}):" if self._verbose else "Logged:"
         lines = [header] + logged
@@ -179,7 +201,94 @@ class MessageHandler:
         )
         if total_volume > 0:
             lines.append(f"  Total volume: {total_volume:.0f} lbs")
+        if comment:
+            lines.append(comment)
         return "\n".join(lines)
+
+    @staticmethod
+    def _generate_log_comment(
+        logged_sets: list[dict],
+        history: list,
+        now: datetime,
+    ) -> str | None:
+        """Return a one-line heuristic comment based on what was just logged.
+
+        Checks in priority order, returns first match:
+        1. New PR (weight exceeds all historical weight for that exercise)
+        2. First time logging an exercise
+        3. Back after gap (>3 days since last set for any logged exercise)
+        4. Weight increase (current > most recent historical for same exercise)
+        5. Pain in notes
+        """
+        if not logged_sets:
+            return None
+
+        # Build per-exercise history lookup
+        # hist_by_ex: {exercise_id: [WorkoutSet, ...]} ordered newest first
+        hist_by_ex: dict[int, list] = {}
+        for ws in history:
+            hist_by_ex.setdefault(ws.exercise_id, []).append(ws)
+
+        # Unique exercises from this batch (preserve order)
+        seen_ids: set[int] = set()
+        exercises: list[dict] = []
+        for s in logged_sets:
+            if s["exercise_id"] not in seen_ids:
+                seen_ids.add(s["exercise_id"])
+                exercises.append(s)
+
+        # Check heuristics per exercise, return first match by priority
+
+        # 1. New PR
+        for ex in exercises:
+            if ex["is_cardio"] or not ex["weight"]:
+                continue
+            ex_hist = hist_by_ex.get(ex["exercise_id"], [])
+            max_current = max(
+                (s["weight"] for s in logged_sets
+                 if s["exercise_id"] == ex["exercise_id"] and s["weight"]),
+                default=0,
+            )
+            max_historical = max(
+                (ws.weight for ws in ex_hist if ws.weight is not None),
+                default=0,
+            )
+            if max_historical > 0 and max_current > max_historical:
+                return f"New PR on {ex['name']}!"
+
+        # 2. First time
+        for ex in exercises:
+            if ex["exercise_id"] not in hist_by_ex:
+                return f"First time logging {ex['name']}."
+
+        # 3. Back after gap (>3 days)
+        for ex in exercises:
+            ex_hist = hist_by_ex.get(ex["exercise_id"], [])
+            if ex_hist:
+                most_recent_date = max(ws.set_date for ws in ex_hist)
+                gap_days = (now - most_recent_date).days
+                if gap_days > 3:
+                    return f"Back at it after {gap_days} days."
+
+        # 4. Weight increase vs most recent
+        for ex in exercises:
+            if ex["is_cardio"] or not ex["weight"]:
+                continue
+            ex_hist = hist_by_ex.get(ex["exercise_id"], [])
+            if not ex_hist:
+                continue
+            # Most recent historical set for this exercise
+            most_recent = ex_hist[0]  # already sorted newest first
+            if most_recent.weight and ex["weight"] > most_recent.weight:
+                return f"Moving up in weight on {ex['name']}."
+
+        # 5. Pain in notes
+        pain_words = {"pain", "sore", "hurt"}
+        for s in logged_sets:
+            if s["notes"] and any(w in s["notes"].lower() for w in pain_words):
+                return "Take it easy if the pain persists."
+
+        return None
 
     @staticmethod
     def _parse_workout_id(message: str) -> int | None:
@@ -287,9 +396,22 @@ class MessageHandler:
             return f"{w_str} {unit}"
         return w_str
 
-    async def _handle_view_stats(self, user_id: int) -> str:
+    async def _handle_view_stats(self, intent, user_id: int) -> str:
+        stats_type = getattr(intent, "stats_type", None) or "overview"
+        if stats_type == "prs":
+            return await self._handle_prs(user_id)
+        elif stats_type == "exercise_history":
+            return await self._handle_exercise_history(intent, user_id)
+        elif stats_type == "volume":
+            return await self._handle_volume_trends(user_id)
+        elif stats_type == "consistency":
+            return await self._handle_consistency(user_id)
+        else:
+            return await self._handle_overview(user_id)
+
+    async def _handle_overview(self, user_id: int) -> str:
+        """Default stats: last 3 days of workouts."""
         async with db_manager.get_session() as session:
-            # Fetch recent batches worth of sets
             all_sets = await workout_set_repo.get_latest_batches(session, user_id, limit=20)
 
             if not all_sets:
@@ -297,12 +419,10 @@ class MessageHandler:
 
             # Group sets by date, keep adding until >= 3 distinct days
             days: OrderedDict[str, list] = OrderedDict()
-            # Sets come back ordered by batch_id desc — reverse to get chronological
             for ws in reversed(all_sets):
                 date_key = ws.set_date.strftime("%a %b %-d")
                 days.setdefault(date_key, []).append(ws)
 
-            # Trim to last 3 days
             while len(days) > 3:
                 days.popitem(last=False)
 
@@ -312,7 +432,6 @@ class MessageHandler:
                     lines.append("")
                 lines.append(date_key)
 
-                # Group sets by exercise, preserving first-appearance order
                 exercises: OrderedDict[int, list] = OrderedDict()
                 for s in day_sets:
                     exercises.setdefault(s.exercise_id, []).append(s)
@@ -321,7 +440,6 @@ class MessageHandler:
                     first = ex_sets[0]
                     name = first.exercise.name if first.exercise else f"exercise #{ex_id}"
 
-                    # Cardio
                     if first.duration_minutes:
                         parts = [f"{first.duration_minutes} min"]
                         if first.distance:
@@ -330,7 +448,6 @@ class MessageHandler:
                         lines.append(f"  {name} \u2014 {', '.join(parts)}")
                         continue
 
-                    # Strength — check if all sets are identical (same reps + weight)
                     all_same = all(
                         s.reps == first.reps and s.weight == first.weight
                         for s in ex_sets
@@ -342,7 +459,6 @@ class MessageHandler:
                     elif all_same and first.weight is None:
                         lines.append(f"  {name} \u2014 {len(ex_sets)}x{first.reps}")
                     else:
-                        # Mixed sets
                         set_strs: list[str] = []
                         for s in ex_sets:
                             r = s.reps or 0
@@ -354,6 +470,166 @@ class MessageHandler:
                         lines.append(f"  {name} \u2014 {' / '.join(set_strs)}")
 
             return "\n".join(lines)
+
+    async def _handle_prs(self, user_id: int) -> str:
+        """Show personal records — heaviest weight per exercise."""
+        async with db_manager.get_session() as session:
+            prs = await workout_set_repo.get_all_prs(session, user_id)
+
+            if not prs:
+                return "No personal records yet — log some weighted exercises first!"
+
+            lines: list[str] = ["Personal Records:"]
+            for ws in prs:
+                name = ws.exercise.name if ws.exercise else f"exercise #{ws.exercise_id}"
+                w_str = self._fmt_weight(ws.weight, ws.weight_unit)
+                date_str = ws.set_date.strftime("%b %-d")
+                reps_str = f" x {ws.reps}" if ws.reps else ""
+                lines.append(f"  {name}: {w_str}{reps_str} ({date_str})")
+
+            return "\n".join(lines)
+
+    async def _handle_exercise_history(self, intent, user_id: int) -> str:
+        """Show history for a specific exercise."""
+        async with db_manager.get_session() as session:
+            # Resolve exercise from mentioned_exercises
+            exercise = None
+            for name in getattr(intent, "mentioned_exercises", []):
+                exercise = await exercise_repo.get_by_name(session, name)
+                if not exercise:
+                    scored = await exercise_repo.search_scored(session, name)
+                    if scored and scored[0][1] >= 0.3:
+                        exercise = scored[0][0]
+                if exercise:
+                    break
+
+            if not exercise:
+                return "Which exercise? Try something like 'bench press history'."
+
+            sets = await workout_set_repo.get_by_exercise(
+                session, exercise.id, user_id, limit=50
+            )
+
+            if not sets:
+                return f"No history for {exercise.name}."
+
+            # Group by batch_id
+            batches: OrderedDict[int, list] = OrderedDict()
+            for s in sets:
+                batches.setdefault(s.batch_id, []).append(s)
+
+            lines: list[str] = [f"{exercise.name} — last {len(batches)} sessions:"]
+            for batch_id, batch_sets in list(batches.items())[:20]:
+                first = batch_sets[0]
+                date_str = first.set_date.strftime("%b %-d")
+
+                if first.duration_minutes:
+                    parts = [f"{first.duration_minutes} min"]
+                    if first.distance:
+                        parts.append(f"{first.distance:g} mi")
+                    lines.append(f"  {date_str}: {', '.join(parts)}")
+                else:
+                    n = len(batch_sets)
+                    all_same = all(
+                        s.reps == first.reps and s.weight == first.weight
+                        for s in batch_sets
+                    )
+                    if all_same and first.weight is not None:
+                        w_str = self._fmt_weight(first.weight, first.weight_unit)
+                        lines.append(f"  {date_str}: {n}x{first.reps} @ {w_str}")
+                    else:
+                        set_strs: list[str] = []
+                        for s in batch_sets:
+                            r = s.reps or 0
+                            w_str = self._fmt_weight(s.weight, s.weight_unit)
+                            set_strs.append(f"{r}x{w_str}")
+                        lines.append(f"  {date_str}: {' / '.join(set_strs)}")
+
+            return "\n".join(lines)
+
+    async def _handle_volume_trends(self, user_id: int) -> str:
+        """Show weekly volume by muscle group for the last 8 weeks."""
+        async with db_manager.get_session() as session:
+            rows = await workout_set_repo.get_weekly_volume(session, user_id, weeks=8)
+
+            if not rows:
+                return "No volume data yet — log some weighted exercises first!"
+
+            # Group by yearweek
+            weeks: OrderedDict[int, list] = OrderedDict()
+            for yw, mg, vol in rows:
+                weeks.setdefault(yw, []).append((mg, vol))
+
+            lines: list[str] = ["Weekly Volume (last 8 weeks):"]
+            for yw, groups in weeks.items():
+                # Convert YEARWEEK to readable format
+                year = yw // 100
+                week = yw % 100
+                lines.append(f"  Week {week} ({year}):")
+                for mg, vol in groups:
+                    lines.append(f"    {mg}: {vol:,.0f} lbs")
+
+            return "\n".join(lines)
+
+    async def _handle_consistency(self, user_id: int) -> str:
+        """Show workout frequency, streak, and consistency metrics."""
+        async with db_manager.get_session() as session:
+            dates_90 = await workout_set_repo.get_workout_dates(session, user_id, days=90)
+            dates_30 = [d for d in dates_90 if (datetime.now().date() - d).days <= 30]
+
+        stats = self._compute_consistency(dates_90, dates_30)
+        lines: list[str] = ["Consistency:"]
+        lines.append(f"  Last 30 days: {stats['count_30d']} workouts")
+        lines.append(f"  Last 90 days: {stats['count_90d']} workouts")
+        if stats["avg_gap"] is not None:
+            lines.append(f"  Avg days between workouts: {stats['avg_gap']:.1f}")
+        if stats["streak"] > 0:
+            unit = "day" if stats["streak"] == 1 else "days"
+            lines.append(f"  Current streak: {stats['streak']} {unit}")
+        elif stats["count_90d"] > 0:
+            lines.append(f"  Last workout: {stats['days_since_last']} days ago")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _compute_consistency(
+        dates_90: list, dates_30: list
+    ) -> dict:
+        """Compute consistency metrics from workout date lists.
+
+        Returns dict with count_30d, count_90d, avg_gap, streak, days_since_last.
+        """
+        today = date_type.today()
+        count_30d = len(dates_30)
+        count_90d = len(dates_90)
+
+        avg_gap = None
+        if count_90d >= 2:
+            sorted_dates = sorted(dates_90)
+            gaps = [(sorted_dates[i + 1] - sorted_dates[i]).days for i in range(len(sorted_dates) - 1)]
+            avg_gap = sum(gaps) / len(gaps)
+
+        # Current streak: count consecutive days working backwards from today
+        streak = 0
+        if dates_90:
+            sorted_dates = sorted(dates_90, reverse=True)
+            expected = today
+            for d in sorted_dates:
+                if d == expected:
+                    streak += 1
+                    expected = expected - timedelta(days=1)
+                elif d < expected:
+                    break
+
+        days_since_last = (today - max(dates_90)).days if dates_90 else None
+
+        return {
+            "count_30d": count_30d,
+            "count_90d": count_90d,
+            "avg_gap": avg_gap,
+            "streak": streak,
+            "days_since_last": days_since_last,
+        }
 
     async def _handle_list_workouts(self, user_id: int) -> str:
         """Show last 10 workouts with batch IDs for use with delete."""

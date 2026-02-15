@@ -1,5 +1,6 @@
 """Async repository pattern implementation for database operations."""
 
+from datetime import datetime
 from typing import Generic, List, Optional, Type, TypeVar, Union
 
 from sqlalchemy import delete, func, select
@@ -242,6 +243,32 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
         result = await session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_recent_for_exercises(
+        self,
+        session: AsyncSession,
+        exercise_ids: List[int],
+        user_id: int,
+        *,
+        exclude_batch: int | None = None,
+        limit_per_exercise: int = 20,
+    ) -> List[WorkoutSet]:
+        """Get recent sets for multiple exercises, optionally excluding a batch."""
+        if not exercise_ids:
+            return []
+        stmt = (
+            select(WorkoutSet)
+            .options(selectinload(WorkoutSet.exercise))
+            .where(WorkoutSet.user_id == user_id)
+            .where(WorkoutSet.exercise_id.in_(exercise_ids))
+            .order_by(WorkoutSet.set_date.desc(), WorkoutSet.set_number)
+        )
+        if exclude_batch is not None:
+            stmt = stmt.where(WorkoutSet.batch_id != exclude_batch)
+        # Fetch more than needed; trim per-exercise after
+        stmt = stmt.limit(limit_per_exercise * len(exercise_ids))
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get_by_exercise(
         self, session: AsyncSession, exercise_id: int, user_id: int, *, limit: int = 50
     ) -> List[WorkoutSet]:
@@ -270,6 +297,80 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
         )
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_all_prs(
+        self, session: AsyncSession, user_id: int
+    ) -> List[WorkoutSet]:
+        """Get the heaviest set per exercise for a user (one row per exercise)."""
+        # Subquery: max weight per exercise
+        max_weight_sub = (
+            select(
+                WorkoutSet.exercise_id,
+                func.max(WorkoutSet.weight).label("max_weight"),
+            )
+            .where(WorkoutSet.user_id == user_id)
+            .where(WorkoutSet.weight.isnot(None))
+            .group_by(WorkoutSet.exercise_id)
+            .subquery()
+        )
+        # Join back to get the actual row (pick one via min id for determinism)
+        min_id_sub = (
+            select(func.min(WorkoutSet.id).label("ws_id"))
+            .where(WorkoutSet.user_id == user_id)
+            .where(WorkoutSet.exercise_id == max_weight_sub.c.exercise_id)
+            .where(WorkoutSet.weight == max_weight_sub.c.max_weight)
+            .group_by(WorkoutSet.exercise_id)
+            .subquery()
+        )
+        stmt = (
+            select(WorkoutSet)
+            .options(selectinload(WorkoutSet.exercise))
+            .where(WorkoutSet.id.in_(select(min_id_sub.c.ws_id)))
+            .order_by(WorkoutSet.weight.desc())
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_weekly_volume(
+        self, session: AsyncSession, user_id: int, *, weeks: int = 8
+    ) -> list:
+        """Get weekly volume (weight * reps) grouped by muscle group.
+
+        Returns list of (yearweek, muscle_group, total_volume) tuples.
+        """
+        from sqlalchemy import text as sa_text
+
+        stmt = sa_text("""
+            SELECT YEARWEEK(ws.set_date, 1) AS yw,
+                   e.muscle_group,
+                   SUM(ws.weight * ws.reps) AS total_vol
+            FROM workout_sets ws
+            JOIN exercises e ON e.id = ws.exercise_id
+            WHERE ws.user_id = :uid
+              AND ws.weight IS NOT NULL
+              AND ws.reps IS NOT NULL
+              AND ws.set_date >= DATE_SUB(CURDATE(), INTERVAL :weeks WEEK)
+            GROUP BY yw, e.muscle_group
+            ORDER BY yw DESC, total_vol DESC
+        """)
+        result = await session.execute(stmt, {"uid": user_id, "weeks": weeks})
+        return list(result.fetchall())
+
+    async def get_workout_dates(
+        self, session: AsyncSession, user_id: int, *, days: int = 90
+    ) -> List[datetime]:
+        """Get distinct workout dates for a user within the last N days."""
+        from sqlalchemy import text as sa_text
+
+        stmt = sa_text("""
+            SELECT DISTINCT DATE(set_date) AS d
+            FROM workout_sets
+            WHERE user_id = :uid
+              AND set_date >= DATE_SUB(CURDATE(), INTERVAL :days DAY)
+            ORDER BY d
+        """)
+        result = await session.execute(stmt, {"uid": user_id, "days": days})
+        return [row[0] for row in result.fetchall()]
 
 
 class TrainingPrincipleRepository(BaseRepository[TrainingPrinciple, dict, dict]):

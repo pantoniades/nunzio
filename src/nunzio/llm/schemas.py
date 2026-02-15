@@ -16,6 +16,10 @@ class UserIntent(BaseModel):
         le=1.0,
         description="Confidence score for intent classification (0.0-1.0)",
     )
+    stats_type: Optional[Literal["overview", "prs", "exercise_history", "volume", "consistency"]] = Field(
+        default=None,
+        description="Sub-type for view_stats intent: overview (recent workouts), prs (personal records), exercise_history (history for a specific exercise), volume (weekly volume trends), consistency (workout frequency/streak)",
+    )
     mentioned_exercises: List[str] = Field(
         default_factory=list,
         description="Exercise names mentioned in the message",
