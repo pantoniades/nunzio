@@ -1,5 +1,6 @@
 """Core message processing — shared by CLI and Telegram bot."""
 
+import asyncio
 import logging
 import re
 from collections import OrderedDict
@@ -30,11 +31,18 @@ class MessageHandler:
         await db_manager.close()
 
     async def process(self, message: str, user_id: int) -> str:
-        """Classify intent and route to the appropriate handler."""
-        intent = await self._llm.classify_intent(message)
+        """Classify intent and route to the appropriate handler.
+
+        Runs classification and workout extraction in parallel so log_workout
+        (the most common intent) doesn't pay for two sequential LLM calls.
+        """
+        intent, workout_data = await asyncio.gather(
+            self._llm.classify_intent(message),
+            self._llm.extract_workout_data(message),
+        )
 
         if intent.intent == "log_workout" and intent.confidence > 0.5:
-            response = await self._handle_log_workout(message, user_id)
+            response = await self._handle_log_workout(message, user_id, workout_data=workout_data)
         elif intent.intent == "view_stats":
             response = await self._handle_view_stats(intent, user_id)
         elif intent.intent == "list_workouts":
@@ -88,8 +96,9 @@ class MessageHandler:
                 expanded.append(ex)
         return expanded
 
-    async def _handle_log_workout(self, message: str, user_id: int) -> str:
-        workout_data = await self._llm.extract_workout_data(message)
+    async def _handle_log_workout(self, message: str, user_id: int, *, workout_data=None) -> str:
+        if workout_data is None:
+            workout_data = await self._llm.extract_workout_data(message)
         if not workout_data or not workout_data.exercises:
             return "I couldn't extract workout details. Try something like: '3 sets of bench press at 185 lbs, 10 reps'"
 

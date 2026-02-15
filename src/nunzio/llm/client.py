@@ -5,7 +5,7 @@ from typing import Optional
 
 import instructor
 from openai import AsyncOpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import AsyncRetrying, retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from ..config import config
 from .schemas import (
@@ -14,6 +14,19 @@ from .schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _instructor_retries(label: str, attempts: int = 3) -> AsyncRetrying:
+    """Build a tenacity AsyncRetrying that logs each instructor JSON-parse retry."""
+
+    def _log(retry_state):
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        logger.warning(
+            "Instructor retry for %s (attempt %d): %s",
+            label, retry_state.attempt_number, exc,
+        )
+
+    return AsyncRetrying(stop=stop_after_attempt(attempts), after=_log)
 
 
 class LLMClient:
@@ -76,7 +89,7 @@ class LLMClient:
                 messages=[{"role": "user", "content": prompt}],
                 response_model=UserIntent,
                 temperature=0.1,
-                max_retries=2,
+                max_retries=_instructor_retries("classify_intent"),
             )
             return result
 
@@ -159,7 +172,7 @@ class LLMClient:
                 messages=[{"role": "user", "content": prompt}],
                 response_model=WorkoutData,
                 temperature=0.1,
-                max_retries=2,
+                max_retries=_instructor_retries("extract_workout"),
             )
             if result.exercises:
                 return result
