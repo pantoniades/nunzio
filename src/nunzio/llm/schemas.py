@@ -1,6 +1,6 @@
 """LLM schemas for structured workout data extraction and conversation management."""
 
-from datetime import datetime
+import datetime
 from typing import Literal, Optional, List
 
 from pydantic import BaseModel, Field
@@ -78,9 +78,9 @@ class WorkoutData(BaseModel):
         default=None,
         description="Workout duration in minutes"
     )
-    date: Optional[datetime] = Field(
+    date: Optional[datetime.date] = Field(
         default=None,
-        description="Workout date if specified"
+        description="Workout date in YYYY-MM-DD format if the user specifies when they worked out (e.g. 'yesterday', 'on Monday', 'Feb 15'). Null if no date is mentioned.",
     )
     notes: Optional[str] = Field(
         default=None,

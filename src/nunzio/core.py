@@ -115,7 +115,10 @@ class MessageHandler:
 
         async with db_manager.get_session() as session:
             batch_id = await workout_set_repo.get_next_batch_id(session, user_id)
-            now = _now_nyc()
+            if workout_data.date:
+                now = datetime.combine(workout_data.date, _now_nyc().time())
+            else:
+                now = _now_nyc()
 
             logged: list[str] = []
             logged_set_data: list[dict] = []
@@ -201,7 +204,11 @@ class MessageHandler:
 
         comment = self._generate_log_comment(logged_set_data, history, now)
 
-        header = f"Logged workout (#{batch_id}):" if self._verbose else "Logged:"
+        if workout_data.date and workout_data.date != date_type.today():
+            date_label = workout_data.date.strftime("%b %-d")
+            header = f"Logged workout (#{batch_id}) for {date_label}:" if self._verbose else f"Logged for {date_label}:"
+        else:
+            header = f"Logged workout (#{batch_id}):" if self._verbose else "Logged:"
         lines = [header] + logged
         total_volume = sum(
             (s.weight or 0) * (s.reps or 0)

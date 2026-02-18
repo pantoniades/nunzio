@@ -1,7 +1,9 @@
 """Async Ollama client with Instructor integration for structured data extraction."""
 
 import logging
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import instructor
 from openai import AsyncOpenAI
@@ -134,8 +136,13 @@ class LLMClient:
         if not self._instructor_client:
             await self.initialize()
 
+        today = datetime.now(ZoneInfo("America/New_York"))
+        today_str = today.strftime("%A, %B %-d, %Y")
+
         prompt = f"""
-        Extract workout details from this message. Be precise with numbers:
+        Extract workout details from this message. Be precise with numbers.
+
+        Today is {today_str}.
 
         MESSAGE: "{message}"
 
@@ -164,6 +171,9 @@ class LLMClient:
           "bench press at 100 lb shoulder sore" → exercise_name="Bench Press", notes="shoulder sore"
           "purple band chest pull" → exercise_name="Chest Pull", notes="purple band"
           "wide grip lat pulldown felt easy" → exercise_name="Lat Pulldown", notes="wide grip, felt easy"
+        - DATE: If the user mentions when they did the workout (e.g. "yesterday", "on Monday",
+          "last Friday", "Feb 15", "2 days ago"), resolve it to a concrete date and set the
+          `date` field in YYYY-MM-DD format. If no date is mentioned, leave `date` as null.
         """
 
         try:

@@ -17,6 +17,7 @@ What works:
 - Per-user data isolation: `user_id` (BigInteger) on `WorkoutSet`, all queries filtered. Telegram passes real user ID, CLI uses `user_id=0`
 - Flat data model: no session table, sets have `user_id`, `batch_id`, `set_date` directly. `batch_id` groups sets from a single log message.
 - Timezone-aware dates: `set_date` stored in America/New_York via `zoneinfo`
+- Date specification: "yesterday", "on Monday", "Feb 15" etc. resolved by LLM to concrete dates. Today's date injected into extraction prompt. Response header shows date when not today.
 - Stats view with sub-types: overview (last 3 days), PRs (heaviest per exercise), exercise history, weekly volume trends, consistency (streak, frequency, avg gap)
 - Log response personality: heuristic one-liner after logging (new PR, first time, back after gap, weight increase, pain warning). Pure code, no LLM call.
 - Proper logging: `logging.getLogger(__name__)` across all modules. CLI and bot configure via `config.logging.level`.
@@ -82,8 +83,11 @@ This context block is injected into the user message alongside a coaching system
   or "change weight on last set to 40 lbs".
 - **Per-user timezone preferences.** Currently hardcoded to America/New_York. Needs a
   `user_settings` table with `timezone` column. Defer until multi-user is actually needed.
-- **Specify Dates.**: Currently everything is "now". User should be able to specify
-  "... yesterday" or "on Feb 24" and have the workout logged at the appropriate time.
+- ~~**Specify Dates.**~~ **Done (v0.6).** Today's date injected into extraction prompt;
+  LLM resolves relative dates ("yesterday", "on Monday", "Feb 15") to concrete
+  `YYYY-MM-DD` via `WorkoutData.date` field. `core.py` uses extracted date when present,
+  falls back to `_now_nyc()`. Response header shows the date when it's not today
+  (e.g. `Logged workout (#5) for Feb 17:`).
 - **LLM serving backend (TBD)**: Currently using Ollama, but may switch. The LLM client
   uses `openai.AsyncOpenAI` pointed at Ollama's `/v1` compat endpoint — the native
   `ollama` Python client doesn't work with Instructor. This means switching backends
