@@ -66,30 +66,31 @@ def test_mixed_sets():
     assert defaulted == {0}
 
 
-# --- Repeat-note extraction ---
+# --- Repeat modifier parsing ---
+
+_parse = MessageHandler._parse_repeat_modifiers
+
 
 def test_repeat_note_bare_again():
     """Just 'again' → no note."""
-    assert MessageHandler._extract_repeat_note("again") is None
+    assert _parse("again")["note"] is None
 
 
 def test_repeat_note_bare_repeat_last():
     """'repeat last' → no note."""
-    assert MessageHandler._extract_repeat_note("repeat last") is None
+    assert _parse("repeat last")["note"] is None
 
 
 def test_repeat_note_with_text():
     """'again didn't struggle this time' → extracts the note."""
-    note = MessageHandler._extract_repeat_note("Again didn't struggle this time")
-    assert note == "didn't struggle this time"
+    assert _parse("Again didn't struggle this time")["note"] == "didn't struggle this time"
 
 
 def test_repeat_note_same_thing_with_text():
     """'same thing but felt easier' → extracts note."""
-    note = MessageHandler._extract_repeat_note("same thing but felt easier")
-    assert note == "but felt easier"
+    assert _parse("same thing but felt easier")["note"] == "but felt easier"
 
 
 def test_repeat_note_only_trigger_words():
     """'same as last time' → no note."""
-    assert MessageHandler._extract_repeat_note("same as last time") is None
+    assert _parse("same as last time")["note"] is None

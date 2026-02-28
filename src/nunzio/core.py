@@ -8,7 +8,7 @@ from datetime import date as date_type, datetime, timedelta
 
 from .database.connection import db_manager
 from .database.models import _now_nyc
-from .database.repository import exercise_repo, message_log_repo, workout_set_repo
+from .database.repository import body_weight_repo, exercise_repo, message_log_repo, workout_set_repo
 from .llm.client import LLMClient
 from .llm.context import build_coaching_context
 
@@ -43,6 +43,8 @@ class MessageHandler:
 
         if intent.intent == "log_workout" and intent.confidence > 0.5:
             response = await self._handle_log_workout(message, user_id, workout_data=workout_data)
+        elif intent.intent == "log_weight":
+            response = await self._handle_log_weight(message, user_id)
         elif intent.intent == "view_stats":
             response = await self._handle_view_stats(intent, user_id)
         elif intent.intent == "list_workouts":
@@ -210,13 +212,15 @@ class MessageHandler:
         else:
             header = f"Logged workout (#{batch_id}):" if self._verbose else "Logged:"
         lines = [header] + logged
-        total_volume = sum(
-            (s.weight or 0) * (s.reps or 0)
-            for s in workout_data.exercises
-            if s.unit != "bodyweight"
-        )
-        if total_volume > 0:
-            lines.append(f"  Total volume: {total_volume:.0f} lbs")
+        volume_by_unit: dict[str, float] = {}
+        for s in workout_data.exercises:
+            if s.unit == "bodyweight" or not s.weight:
+                continue
+            unit = s.unit or "lbs"
+            volume_by_unit[unit] = volume_by_unit.get(unit, 0) + s.weight * (s.reps or 0)
+        for unit, vol in volume_by_unit.items():
+            if vol > 0:
+                lines.append(f"  Total volume: {vol:.0f} {unit}")
         if comment:
             lines.append(comment)
         return "\n".join(lines)
@@ -344,19 +348,59 @@ class MessageHandler:
             return f"Deleted workout #{batch_id} ({date_str}): {ex_str} — {len(deleted)} sets removed."
 
     @staticmethod
-    def _extract_repeat_note(message: str) -> str | None:
-        """Strip trigger words from a repeat message; remainder becomes the note."""
+    def _parse_repeat_modifiers(message: str) -> dict:
+        """Parse weight overrides and repetition count from a repeat message.
+
+        Returns dict with keys: weight, weight_unit, times, note.
+        """
+        # Strip trigger words first
         stripped = re.sub(
             r"\b(same as last time|repeat last|same thing|again|repeat)\b",
             "",
             message,
             flags=re.IGNORECASE,
         ).strip(" ,.-;:")
-        return stripped or None
+
+        weight = None
+        weight_unit = None
+        times = 1
+        note = stripped
+
+        # Weight override: "at 35 lb", "for 35 lbs", "@ 40", "35 lb", "35 kg"
+        weight_match = re.search(
+            r"(?:at|for|@)\s*(\d+(?:\.\d+)?)\s*(lbs?|kg)?\b"
+            r"|(\d+(?:\.\d+)?)\s*(lbs?|kg)\b",
+            stripped,
+            re.IGNORECASE,
+        )
+        if weight_match:
+            w = weight_match.group(1) or weight_match.group(3)
+            u = weight_match.group(2) or weight_match.group(4)
+            weight = float(w)
+            weight_unit = "kg" if u and u.lower().startswith("k") else "lbs"
+            note = stripped[:weight_match.start()] + stripped[weight_match.end():]
+
+        # Repetition count: "twice", "x2", "2x", "2 times", "3 times"
+        times_match = re.search(
+            r"\btwice\b|\bx\s*(\d+)\b|(\d+)\s*x\b|(\d+)\s+times?\b",
+            note or "",
+            re.IGNORECASE,
+        )
+        if times_match:
+            if "twice" in (times_match.group(0) or "").lower():
+                times = 2
+            else:
+                t = times_match.group(1) or times_match.group(2) or times_match.group(3)
+                times = int(t)
+            note = note[:times_match.start()] + note[times_match.end():]
+
+        note = (note or "").strip(" ,.-;:") or None
+
+        return {"weight": weight, "weight_unit": weight_unit, "times": times, "note": note}
 
     async def _handle_repeat_last(self, message: str, user_id: int) -> str:
-        """Repeat the user's most recent workout."""
-        new_note = self._extract_repeat_note(message)
+        """Repeat the user's most recent workout, with optional modifiers."""
+        mods = self._parse_repeat_modifiers(message)
 
         async with db_manager.get_session() as session:
             last_sets = await workout_set_repo.get_latest_batch_for_user(session, user_id)
@@ -364,42 +408,50 @@ class MessageHandler:
                 return "Nothing to repeat — no previous workouts found."
 
             old_batch_id = last_sets[0].batch_id
-            new_batch_id = await workout_set_repo.get_next_batch_id(session, user_id)
             now = _now_nyc()
+            sorted_sets = sorted(last_sets, key=lambda s: (s.exercise_id, s.set_number))
 
             logged: list[str] = []
-            for old_set in sorted(last_sets, key=lambda s: (s.exercise_id, s.set_number)):
-                await workout_set_repo.create(
-                    session,
-                    obj_in={
-                        "user_id": user_id,
-                        "batch_id": new_batch_id,
-                        "set_date": now,
-                        "exercise_id": old_set.exercise_id,
-                        "set_number": old_set.set_number,
-                        "reps": old_set.reps,
-                        "weight": old_set.weight,
-                        "weight_unit": old_set.weight_unit,
-                        "duration_minutes": old_set.duration_minutes,
-                        "distance": old_set.distance,
-                        "raw_exercise_name": old_set.raw_exercise_name,
-                        "notes": new_note,  # new note (if any), never carry over old
-                    },
-                )
-                name = old_set.exercise.name if old_set.exercise else f"exercise #{old_set.exercise_id}"
-                if old_set.duration_minutes:
-                    parts = [f"{old_set.duration_minutes} min"]
-                    if old_set.distance:
-                        parts.append(f"{old_set.distance} mi")
-                    line = f"  {name}: {', '.join(parts)}"
-                else:
-                    weight_str = f"{old_set.weight} {old_set.weight_unit}" if old_set.weight else "bodyweight"
-                    line = f"  {name}: set {old_set.set_number} - {old_set.reps} reps @ {weight_str}"
-                if new_note:
-                    line += f" — note: {new_note}"
-                logged.append(line)
+            for _rep in range(mods["times"]):
+                new_batch_id = await workout_set_repo.get_next_batch_id(session, user_id)
+
+                for old_set in sorted_sets:
+                    use_weight = mods["weight"] if mods["weight"] is not None else old_set.weight
+                    use_unit = mods["weight_unit"] if mods["weight_unit"] is not None else old_set.weight_unit
+
+                    await workout_set_repo.create(
+                        session,
+                        obj_in={
+                            "user_id": user_id,
+                            "batch_id": new_batch_id,
+                            "set_date": now,
+                            "exercise_id": old_set.exercise_id,
+                            "set_number": old_set.set_number,
+                            "reps": old_set.reps,
+                            "weight": use_weight,
+                            "weight_unit": use_unit,
+                            "duration_minutes": old_set.duration_minutes,
+                            "distance": old_set.distance,
+                            "raw_exercise_name": old_set.raw_exercise_name,
+                            "notes": mods["note"],
+                        },
+                    )
+                    name = old_set.exercise.name if old_set.exercise else f"exercise #{old_set.exercise_id}"
+                    if old_set.duration_minutes:
+                        parts = [f"{old_set.duration_minutes} min"]
+                        if old_set.distance:
+                            parts.append(f"{old_set.distance} mi")
+                        line = f"  {name}: {', '.join(parts)}"
+                    else:
+                        weight_str = f"{use_weight} {use_unit}" if use_weight else "bodyweight"
+                        line = f"  {name}: set {old_set.set_number} - {old_set.reps} reps @ {weight_str}"
+                    if mods["note"]:
+                        line += f" — note: {mods['note']}"
+                    logged.append(line)
 
         header = f"Repeated #{old_batch_id} → #{new_batch_id}:" if self._verbose else "Repeated last workout:"
+        if mods["times"] > 1:
+            header = f"Repeated #{old_batch_id} x{mods['times']}:" if self._verbose else f"Repeated last workout x{mods['times']}:"
         return "\n".join([header] + logged)
 
     @staticmethod
@@ -422,6 +474,8 @@ class MessageHandler:
             return await self._handle_volume_trends(user_id)
         elif stats_type == "consistency":
             return await self._handle_consistency(user_id)
+        elif stats_type == "weight":
+            return await self._handle_weight_trend(user_id)
         else:
             return await self._handle_overview(user_id)
 
@@ -677,6 +731,79 @@ class MessageHandler:
                 lines.append(f"#{batch_id}  {date_str}  {ex_str} ({n} {set_word})")
 
             return "\n".join(lines)
+
+    async def _handle_log_weight(self, message: str, user_id: int) -> str:
+        """Log a body weight reading."""
+        data = await self._llm.extract_body_weight_data(message)
+        if not data:
+            return "I couldn't extract a weight reading. Try something like: 'weighed 185 lbs'"
+
+        if data.date:
+            recorded_at = datetime.combine(data.date, _now_nyc().time())
+        else:
+            recorded_at = _now_nyc()
+
+        async with db_manager.get_session() as session:
+            previous = await body_weight_repo.get_latest(session, user_id)
+
+            await body_weight_repo.create(
+                session,
+                obj_in={
+                    "user_id": user_id,
+                    "weight": data.weight,
+                    "unit": data.unit,
+                    "notes": data.notes,
+                    "recorded_at": recorded_at,
+                },
+            )
+
+        w_str = f"{data.weight:g} {data.unit}"
+        parts = [f"Logged {w_str}."]
+
+        if data.notes:
+            parts[0] = f"Logged {w_str} ({data.notes})."
+
+        if data.date and data.date != date_type.today():
+            date_label = data.date.strftime("%b %-d")
+            parts[0] = parts[0].rstrip(".") + f" for {date_label}."
+
+        if previous:
+            delta = data.weight - previous.weight
+            if abs(delta) >= 0.1:
+                arrow = "\u2193" if delta < 0 else "\u2191"
+                prev_date = previous.recorded_at.strftime("%b %-d")
+                parts.append(f"{arrow} {abs(delta):g} {data.unit} from last weigh-in on {prev_date}.")
+
+        return " ".join(parts)
+
+    async def _handle_weight_trend(self, user_id: int) -> str:
+        """Show recent body weight readings and trend."""
+        async with db_manager.get_session() as session:
+            records = await body_weight_repo.get_by_user(session, user_id, limit=10)
+
+        if not records:
+            return "No body weight readings yet. Try: 'weighed 185 lbs'"
+
+        lines: list[str] = ["Body Weight:"]
+        for r in records:
+            date_str = r.recorded_at.strftime("%b %-d")
+            line = f"  {date_str}: {r.weight:g} {r.unit}"
+            if r.notes:
+                line += f" ({r.notes})"
+            lines.append(line)
+
+        # Overall delta (oldest to newest in this window)
+        if len(records) >= 2:
+            newest = records[0]
+            oldest = records[-1]
+            delta = newest.weight - oldest.weight
+            days = (newest.recorded_at - oldest.recorded_at).days
+            if days > 0:
+                per_week = delta / days * 7
+                arrow = "\u2193" if delta < 0 else "\u2191"
+                lines.append(f"  {arrow} {abs(delta):g} {newest.unit} over {days} days ({per_week:+.1f}/wk)")
+
+        return "\n".join(lines)
 
     async def _handle_coaching(self, message: str, intent, user_id: int) -> str:
         async with db_manager.get_session() as session:

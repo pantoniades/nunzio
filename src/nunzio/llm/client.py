@@ -11,6 +11,7 @@ from tenacity import AsyncRetrying, retry, stop_after_attempt, wait_exponential,
 
 from ..config import config
 from .schemas import (
+    BodyWeightData,
     UserIntent,
     WorkoutData,
 )
@@ -65,6 +66,7 @@ class LLMClient:
 
         POSSIBLE INTENTS:
         - log_workout: User is reporting a workout they already did (past tense: "I did", "I benched", etc.)
+        - log_weight: User is reporting their body weight ("weighed 185", "weight is 82 kg", "191.4 lbs", "body weight 180")
         - view_stats: User wants to see their workout history or statistics
         - list_workouts: User wants to see a list of recent workout sessions with IDs ("last workouts", "list workouts", "list sessions", "show sessions")
         - delete_workout: User wants to undo, delete, or remove a logged workout ("undo", "delete last", "remove session #42", "that's wrong")
@@ -76,6 +78,7 @@ class LLMClient:
         - "exercise_history": User asks about a specific exercise's history ("bench press history", "how has my squat been")
         - "volume": User asks about training volume ("how much volume this week", "weekly volume")
         - "consistency": User asks about workout frequency/consistency ("how consistent am I", "how often do I work out", "workout streak")
+        - "weight": User asks about body weight history or trend ("what's my weight", "weight trend", "weight history")
         - "overview": General stats request or anything else ("show my stats", "how have my workouts been")
 
         Also extract any exercise names and muscle groups mentioned in the message.
@@ -100,6 +103,11 @@ class LLMClient:
             # Fallback classification
             message_lower = message.lower()
             if any(
+                word in message_lower
+                for word in ["weigh", "weighed", "body weight", "bw"]
+            ):
+                return UserIntent(intent="log_weight", confidence=0.7)
+            elif any(
                 word in message_lower
                 for word in ["undo", "delete", "remove"]
             ):
@@ -164,13 +172,22 @@ class LLMClient:
           "ran 3 miles in 25 min" → duration_minutes=25, distance=3.0, reps=null
         - Weight in pounds unless specified otherwise
         - If unclear, make reasonable assumptions
-        - NOTES: Any subjective observations (pain, effort, form, mood) or equipment/variant
-          modifiers (band color, grip width, cable attachment, tempo) go in the `notes` field.
-          Keep the exercise name clean — just the base movement.
+        - EXERCISE NAMES: Include movement qualifiers that change which exercise it is.
+          Words like incline, decline, seated, low, cable, overhead, reverse, Bulgarian,
+          Romanian, sumo, close-grip, wide-grip, lateral, rear delt, face, scapular
+          are PART OF THE NAME, not notes.
+          Examples:
+          "incline bench press" → exercise_name="Incline Bench Press"
+          "low row" → exercise_name="Low Row"
+          "seated row" → exercise_name="Seated Row"
+          "Romanian deadlift" → exercise_name="Romanian Deadlift"
+          "rear delt fly" → exercise_name="Rear Delt Fly"
+        - NOTES: Only subjective observations (pain, effort, form, mood) and equipment details
+          (band color, cable attachment, tempo, machine setting) go in the `notes` field.
           Examples:
           "bench press at 100 lb shoulder sore" → exercise_name="Bench Press", notes="shoulder sore"
           "purple band chest pull" → exercise_name="Chest Pull", notes="purple band"
-          "wide grip lat pulldown felt easy" → exercise_name="Lat Pulldown", notes="wide grip, felt easy"
+          "incline press felt easy" → exercise_name="Incline Press", notes="felt easy"
         - DATE: If the user mentions when they did the workout (e.g. "yesterday", "on Monday",
           "last Friday", "Feb 15", "2 days ago"), resolve it to a concrete date and set the
           `date` field in YYYY-MM-DD format. If no date is mentioned, leave `date` as null.
@@ -190,6 +207,45 @@ class LLMClient:
 
         except Exception:
             logger.error("Workout extraction failed", exc_info=True)
+            return None
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+    )
+    async def extract_body_weight_data(self, message: str) -> BodyWeightData | None:
+        """Extract body weight data from user message."""
+        if not self._instructor_client:
+            await self.initialize()
+
+        today = datetime.now(ZoneInfo("America/New_York"))
+        today_str = today.strftime("%A, %B %-d, %Y")
+
+        prompt = f"""
+        Extract the body weight reading from this message.
+
+        Today is {today_str}.
+
+        MESSAGE: "{message}"
+
+        IMPORTANT:
+        - Extract the numeric weight value and unit (lbs or kg). Default to lbs if not specified.
+        - If the user mentions when they weighed ("yesterday", "this morning", "on Monday"),
+          resolve it to a concrete date in YYYY-MM-DD format. Otherwise leave date as null.
+        - Any context about the weigh-in (morning, post-workout, fasted, after dinner) goes in notes.
+        """
+
+        try:
+            result = await self._instructor_client.chat.completions.create(
+                model=config.llm.model,
+                messages=[{"role": "user", "content": prompt}],
+                response_model=BodyWeightData,
+                temperature=0.1,
+                max_retries=_instructor_retries("extract_body_weight"),
+            )
+            return result
+        except Exception:
+            logger.error("Body weight extraction failed", exc_info=True)
             return None
 
     async def generate_coaching_response(self, message: str, context: str) -> str:
