@@ -3,6 +3,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database.repository import (
+    body_weight_repo,
     exercise_repo,
     training_principle_repo,
     workout_set_repo,
@@ -128,5 +129,17 @@ async def build_coaching_context(
                     )
 
         sections.append("\n".join(ex_lines))
+
+    # 6. Body weight history (last 5 readings)
+    weight_records = await body_weight_repo.get_by_user(session, user_id, limit=5)
+    if weight_records:
+        bw_lines = ["BODY WEIGHT:"]
+        for r in weight_records:
+            date_str = r.recorded_at.strftime("%b %d")
+            line = f"- {date_str}: {r.weight:g} {r.unit}"
+            if r.notes:
+                line += f" ({r.notes})"
+            bw_lines.append(line)
+        sections.append("\n".join(bw_lines))
 
     return "\n\n".join(sections)

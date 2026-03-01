@@ -130,6 +130,32 @@ class MessageLog(Base):
         return f"<MessageLog(id={self.id}, intent='{self.classified_intent}', confidence={self.confidence})>"
 
 
+class BodyWeight(Base):
+    """A single body weight reading."""
+
+    __tablename__ = "body_weight"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    weight: Mapped[float] = mapped_column(Float, nullable=False)
+    unit: Mapped[str] = mapped_column(String(10), nullable=False, default="lbs")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_now_nyc
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_now_nyc
+    )
+
+    __table_args__ = (
+        Index("idx_body_weight_user_id", "user_id"),
+        Index("idx_body_weight_recorded_at", "recorded_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<BodyWeight(id={self.id}, user_id={self.user_id}, weight={self.weight} {self.unit})>"
+
+
 class TrainingPrinciple(Base):
     """Coaching knowledge for prompt injection — progression rules, rep ranges, etc."""
 

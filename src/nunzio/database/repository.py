@@ -7,7 +7,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .models import Base, Exercise, MessageLog, TrainingPrinciple, WorkoutSet
+from .models import Base, BodyWeight, Exercise, MessageLog, TrainingPrinciple, WorkoutSet
 
 ModelType = TypeVar("ModelType", bound=Base)
 CreateSchemaType = TypeVar("CreateSchemaType")
@@ -373,6 +373,36 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
         return [row[0] for row in result.fetchall()]
 
 
+class BodyWeightRepository(BaseRepository[BodyWeight, dict, dict]):
+    """Repository for BodyWeight operations."""
+
+    async def get_by_user(
+        self, session: AsyncSession, user_id: int, *, limit: int = 30
+    ) -> List[BodyWeight]:
+        """Get recent body weight records for a user, newest first."""
+        stmt = (
+            select(BodyWeight)
+            .where(BodyWeight.user_id == user_id)
+            .order_by(BodyWeight.recorded_at.desc())
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_latest(
+        self, session: AsyncSession, user_id: int
+    ) -> Optional[BodyWeight]:
+        """Get the most recent body weight record for a user."""
+        stmt = (
+            select(BodyWeight)
+            .where(BodyWeight.user_id == user_id)
+            .order_by(BodyWeight.recorded_at.desc())
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+
 class TrainingPrincipleRepository(BaseRepository[TrainingPrinciple, dict, dict]):
     """Repository for TrainingPrinciple operations."""
 
@@ -417,5 +447,6 @@ class MessageLogRepository(BaseRepository[MessageLog, dict, dict]):
 # Repository instances
 exercise_repo = ExerciseRepository(Exercise)
 workout_set_repo = WorkoutSetRepository(WorkoutSet)
+body_weight_repo = BodyWeightRepository(BodyWeight)
 training_principle_repo = TrainingPrincipleRepository(TrainingPrinciple)
 message_log_repo = MessageLogRepository(MessageLog)

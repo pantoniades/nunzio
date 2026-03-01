@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 class UserIntent(BaseModel):
     """User intent classification with exercise/muscle group extraction."""
-    intent: Literal["log_workout", "view_stats", "list_workouts", "coaching", "delete_workout", "repeat_last"] = Field(
+    intent: Literal["log_workout", "view_stats", "list_workouts", "coaching", "delete_workout", "repeat_last", "log_weight"] = Field(
         description="Primary user intention"
     )
     confidence: float = Field(
@@ -16,7 +16,7 @@ class UserIntent(BaseModel):
         le=1.0,
         description="Confidence score for intent classification (0.0-1.0)",
     )
-    stats_type: Optional[Literal["overview", "prs", "exercise_history", "volume", "consistency"]] = Field(
+    stats_type: Optional[Literal["overview", "prs", "exercise_history", "volume", "consistency", "weight"]] = Field(
         default=None,
         description="Sub-type for view_stats intent: overview (recent workouts), prs (personal records), exercise_history (history for a specific exercise), volume (weekly volume trends), consistency (workout frequency/streak)",
     )
@@ -89,4 +89,21 @@ class WorkoutData(BaseModel):
     perceived_exertion: Optional[int] = Field(
         default=None,
         description="RPE scale 1-10"
+    )
+
+
+class BodyWeightData(BaseModel):
+    """Extracted body weight reading."""
+    weight: float = Field(description="Body weight value")
+    unit: Literal["lbs", "kg"] = Field(
+        default="lbs",
+        description="Weight unit",
+    )
+    date: Optional[datetime.date] = Field(
+        default=None,
+        description="Date of weigh-in in YYYY-MM-DD format if specified (e.g. 'yesterday', 'this morning'). Null if no date mentioned.",
+    )
+    notes: Optional[str] = Field(
+        default=None,
+        description="Context about the weigh-in (e.g. 'morning', 'post-workout', 'fasted')",
     )
