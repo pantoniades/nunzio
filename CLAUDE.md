@@ -2,14 +2,14 @@
 
 ## What This Is
 
-A workout tracker with two interfaces — CLI and Telegram bot — that uses a local LLM (Ollama) for natural language understanding and MySQL for persistence. You say what you did in plain English, the LLM extracts structured data, and it gets saved to the database. Ask for coaching and it gives specific prescriptions based on your actual history.
+A workout tracker with two interfaces — CLI and Telegram bot — that uses a local LLM for natural language understanding and MySQL for persistence. You say what you did in plain English, the LLM extracts structured data, and it gets saved to the database. Ask for coaching and it gives specific prescriptions based on your actual history.
 
 ## Current State
 
 Working end-to-end via both CLI and Telegram bot. The pipeline is: user input → LLM intent classification (with exercise/muscle group extraction) → routing to log_workout, view_stats, coaching, delete_workout, or repeat_last → DB persistence or LLM coaching response.
 
 What works:
-- Natural language workout logging via Ollama/Instructor structured extraction (JSON mode)
+- Natural language workout logging via Instructor structured extraction (JSON mode)
 - Cardio logging with duration_minutes and distance (not just sets/reps/weight)
 - Exercise catalog seeded in DB (29 exercises across 8 muscle groups) with per-exercise coaching guidance
 - Training principles table (9 principles: progression, deload, rep ranges, volume, etc.)
@@ -49,13 +49,13 @@ What works:
 
 This context block is injected into the user message alongside a coaching system prompt. The LLM generates free-text advice (NOT Instructor — raw completions).
 
-**Instructor mode** — Uses `instructor.Mode.JSON` (not TOOLS) because qwen generates multiple tool calls which Instructor can't handle.
+**Instructor mode** — Uses `instructor.Mode.JSON` (not TOOLS) because some models generate multiple tool calls which Instructor can't handle.
 
 ## Infrastructure
 
-- **LLM**: Ollama on `odysseus:11434`, model `qwen3:30b-a3b` (configurable via .env)
+- **LLM**: OpenAI-compatible API (currently llama-swap on `odysseus:11500`), model `qwen3.5-27b` (configurable via .env)
 - **DB**: MySQL on `odysseus:3306`, database `nunzio_workouts`
-- **Structured extraction**: Instructor library (JSON mode) wrapping Ollama for Pydantic model output
+- **Structured extraction**: Instructor library (JSON mode) wrapping OpenAI client for Pydantic model output
 - **Container**: Podman via multi-stage Containerfile, runs `nunzio-bot` by default. Config via `--env-file`.
 
 ## Schema (v0.5 — flat model)
@@ -71,7 +71,7 @@ This context block is injected into the user message alongside a coaching system
 
 - **Run tests before considering any change done.** `pytest tests/` is the bar for "finished."
 - **Write at least a smoke test when adding a new feature** — don't move on without one. The coaching context pipeline shipped with zero tests and the intent rename silently broke existing ones. That's what happens when tests aren't part of the workflow.
-- Current tests hit real Ollama and MySQL. Mocking is on the TODO but isn't an excuse to skip running what exists.
+- Current tests hit real LLM and MySQL. Mocking is on the TODO but isn't an excuse to skip running what exists.
 
 ## What's Next
 
@@ -88,11 +88,10 @@ This context block is injected into the user message alongside a coaching system
   `YYYY-MM-DD` via `WorkoutData.date` field. `core.py` uses extracted date when present,
   falls back to `_now_nyc()`. Response header shows the date when it's not today
   (e.g. `Logged workout (#5) for Feb 17:`).
-- **LLM serving backend (TBD)**: Currently using Ollama, but may switch. The LLM client
-  uses `openai.AsyncOpenAI` pointed at Ollama's `/v1` compat endpoint — the native
-  `ollama` Python client doesn't work with Instructor. This means switching backends
-  (vLLM, llama.cpp server, etc.) should be straightforward as long as they expose an
-  OpenAI-compatible API. The `ollama` pip package is still in deps but unused at runtime.
+- ~~**LLM serving backend (TBD)**~~ **Done.** Switched from Ollama to llama-swap.
+  The LLM client uses `openai.AsyncOpenAI` pointed at any OpenAI-compatible `/v1`
+  endpoint — switching backends (vLLM, llama.cpp server, Ollama, etc.) just means
+  changing `LLM__BASE_URL` and `LLM__MODEL` in `.env`.
 - **Web search for recommendations**: Let Nunzio search the web to give better, more
   contextual workout suggestions instead of just listing exercises from the DB.
 - ~~**Personality on log responses.**~~ **Done (v0.5).** Heuristic one-liners after

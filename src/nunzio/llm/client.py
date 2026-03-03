@@ -1,4 +1,4 @@
-"""Async Ollama client with Instructor integration for structured data extraction."""
+"""Async LLM client with Instructor integration for structured data extraction."""
 
 import logging
 from datetime import datetime
@@ -33,7 +33,7 @@ def _instructor_retries(label: str, attempts: int = 3) -> AsyncRetrying:
 
 
 class LLMClient:
-    """Manages LLM communication via Ollama's OpenAI-compatible API + Instructor."""
+    """Manages LLM communication via OpenAI-compatible API + Instructor."""
 
     def __init__(self) -> None:
         self._client: Optional[AsyncOpenAI] = None
@@ -43,7 +43,7 @@ class LLMClient:
         """Initialize the LLM client."""
         self._client = AsyncOpenAI(
             base_url=f"{config.llm.base_url}/v1",
-            api_key="ollama",
+            api_key="not-needed",
         )
         self._instructor_client = instructor.from_openai(
             self._client, mode=instructor.Mode.JSON

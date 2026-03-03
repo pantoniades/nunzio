@@ -19,12 +19,12 @@ class DatabaseConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    """LLM configuration for Ollama."""
+    """LLM configuration."""
 
     base_url: str = Field(
-        default="http://odysseus:11434", description="Ollama base URL"
+        default="http://localhost:8080", description="OpenAI-compatible API base URL"
     )
-    model: str = Field(default="llama3.2", description="Default model to use")
+    model: str = Field(default="qwen3.5-27b", description="Default model to use")
     timeout: int = Field(default=60, description="Request timeout in seconds")
 
 

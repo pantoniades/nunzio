@@ -1,5 +1,5 @@
 # Multi-stage Containerfile for Nunzio - Local Workout Assistant
-# Optimized for Podman deployment with external MySQL and Ollama services
+# Optimized for Podman deployment with external MySQL and OpenAI-compatible LLM server
 
 # Build stage
 FROM python:3.13-slim AS builder
