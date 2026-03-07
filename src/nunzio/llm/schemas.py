@@ -16,9 +16,17 @@ class UserIntent(BaseModel):
         le=1.0,
         description="Confidence score for intent classification (0.0-1.0)",
     )
-    stats_type: Optional[Literal["overview", "prs", "exercise_history", "volume", "consistency", "weight"]] = Field(
+    stats_type: Optional[Literal["overview", "prs", "exercise_history", "volume", "consistency", "weight", "last_session"]] = Field(
         default=None,
-        description="Sub-type for view_stats intent: overview (recent workouts), prs (personal records), exercise_history (history for a specific exercise), volume (weekly volume trends), consistency (workout frequency/streak)",
+        description="Sub-type for view_stats intent: overview (recent workouts), prs (personal records), exercise_history (history for a specific exercise), volume (weekly volume trends), consistency (workout frequency/streak), last_session (last workout only — 'last time', 'last workout', 'what did I do last')",
+    )
+    stats_date: Optional[datetime.date] = Field(
+        default=None,
+        description="Start/single date for stats filtering (YYYY-MM-DD). Resolve 'today', 'yesterday', 'on Monday' etc. to concrete dates.",
+    )
+    stats_end_date: Optional[datetime.date] = Field(
+        default=None,
+        description="End date for range queries like 'this week', 'last week'. Null for single-day queries.",
     )
     mentioned_exercises: List[str] = Field(
         default_factory=list,

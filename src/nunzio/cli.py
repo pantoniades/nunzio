@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sys
+from urllib.parse import urlparse
 
 from .config import config
 from .core import MessageHandler
@@ -20,7 +21,8 @@ class NunzioCLI:
 
     async def run(self) -> None:
         await self._handler.initialize()
-        print("Connected to database and LLM.")
+        llm_host = urlparse(config.llm.base_url).netloc
+        print(f"Using {config.llm.model} on {llm_host}")
         print("Nunzio Workout Assistant")
         print("Type 'help' for commands or 'exit' to quit.")
         print("-" * 50)

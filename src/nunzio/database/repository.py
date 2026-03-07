@@ -230,6 +230,25 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
         result = await session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_sets_for_date_range(
+        self,
+        session: AsyncSession,
+        user_id: int,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> List[WorkoutSet]:
+        """Get sets within a date range, with exercises eagerly loaded."""
+        stmt = (
+            select(WorkoutSet)
+            .options(selectinload(WorkoutSet.exercise))
+            .where(WorkoutSet.user_id == user_id)
+            .where(WorkoutSet.set_date >= start_date)
+            .where(WorkoutSet.set_date < end_date)
+            .order_by(WorkoutSet.set_date.desc(), WorkoutSet.batch_id.desc(), WorkoutSet.set_number)
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get_by_user(
         self, session: AsyncSession, user_id: int, *, limit: int = 1000
     ) -> List[WorkoutSet]:

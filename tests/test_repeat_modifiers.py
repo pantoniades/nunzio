@@ -66,6 +66,19 @@ def test_weight_and_times():
     assert m["times"] == 2
 
 
+def test_bare_number_as_weight():
+    m = parse("again 54")
+    assert m["weight"] == 54.0
+    assert m["weight_unit"] == "lbs"
+    assert m["note"] is None
+
+
+def test_bare_decimal_as_weight():
+    m = parse("again 42.5")
+    assert m["weight"] == 42.5
+    assert m["weight_unit"] == "lbs"
+
+
 def test_note_preserved():
     m = parse("again, elbow feels better")
     assert m["weight"] is None

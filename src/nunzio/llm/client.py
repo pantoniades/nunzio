@@ -59,8 +59,13 @@ class LLMClient:
         if not self._instructor_client:
             await self.initialize()
 
+        today = datetime.now(ZoneInfo("America/New_York"))
+        today_str = today.strftime("%A, %B %-d, %Y")
+
         prompt = f"""
         Analyze this user message and classify their primary intent:
+
+        Today is {today_str}.
 
         MESSAGE: "{message}"
 
@@ -79,13 +84,24 @@ class LLMClient:
         - "volume": User asks about training volume ("how much volume this week", "weekly volume")
         - "consistency": User asks about workout frequency/consistency ("how consistent am I", "how often do I work out", "workout streak")
         - "weight": User asks about body weight history or trend ("what's my weight", "weight trend", "weight history")
+        - "last_session": User asks about their last/most recent workout ("last time", "last workout", "what did I do last")
         - "overview": General stats request or anything else ("show my stats", "how have my workouts been")
+
+        DATE FILTERING for view_stats and list_workouts:
+        - If the user mentions a date or time range ("today", "yesterday", "this week", "last Monday", "on March 3"),
+          resolve it to concrete dates and set stats_date (and stats_end_date for ranges).
+        - "today" → stats_date = today's date
+        - "yesterday" → stats_date = yesterday's date
+        - "this week" → stats_date = Monday of this week, stats_end_date = today
+        - "last week" → stats_date = Monday of last week, stats_end_date = Sunday of last week
+        - For "last time" / "last workout" / "what did I do last": use stats_type="last_session", leave dates null.
+        - If no date is mentioned, leave stats_date and stats_end_date null.
 
         Also extract any exercise names and muscle groups mentioned in the message.
         Exercise names should match common names like "Bench Press", "Squat", "Deadlift", etc.
         Muscle groups should match: chest, back, shoulders, legs, biceps, triceps, core, cardio, flexibility.
 
-        Return the intent, confidence score, stats_type (only for view_stats), any mentioned exercises, and any mentioned muscle groups.
+        Return the intent, confidence score, stats_type (only for view_stats), stats_date, stats_end_date, any mentioned exercises, and any mentioned muscle groups.
         """
 
         try:

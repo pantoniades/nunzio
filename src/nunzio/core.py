@@ -379,6 +379,11 @@ class MessageHandler:
             weight = float(w)
             weight_unit = "kg" if u and u.lower().startswith("k") else "lbs"
             note = stripped[:weight_match.start()] + stripped[weight_match.end():]
+        elif re.fullmatch(r"\d+(?:\.\d+)?", stripped):
+            # Bare number with no unit: "again 54" → 54 lbs
+            weight = float(stripped)
+            weight_unit = "lbs"
+            note = None
 
         # Repetition count: "twice", "x2", "2x", "2 times", "3 times"
         times_match = re.search(
@@ -477,24 +482,70 @@ class MessageHandler:
         elif stats_type == "weight":
             return await self._handle_weight_trend(user_id)
         else:
-            return await self._handle_overview(user_id)
+            return await self._handle_overview(user_id, intent)
 
-    async def _handle_overview(self, user_id: int) -> str:
-        """Default stats: last 3 days of workouts."""
+    async def _handle_overview(self, user_id: int, intent=None) -> str:
+        """Stats overview with optional date filtering.
+
+        - last_session: all sets from the most recent workout day before today
+        - stats_date set: filter to that date (or date range if stats_end_date set)
+        - otherwise: last 3 days of workouts
+        """
+        stats_type = getattr(intent, "stats_type", None)
+        stats_date = getattr(intent, "stats_date", None)
+        stats_end_date = getattr(intent, "stats_end_date", None)
+
         async with db_manager.get_session() as session:
-            all_sets = await workout_set_repo.get_latest_batches(session, user_id, limit=20)
+            if stats_type == "last_session":
+                # Find the most recent workout day before today, return all sets from it
+                recent = await workout_set_repo.get_latest_batches(session, user_id, limit=50)
+                today = _now_nyc().date()
+                last_day = None
+                for ws in recent:
+                    d = ws.set_date.date() if isinstance(ws.set_date, datetime) else ws.set_date
+                    if d < today:
+                        last_day = d
+                        break
+                if last_day is None:
+                    all_sets = []
+                else:
+                    start = datetime.combine(last_day, datetime.min.time())
+                    end = datetime.combine(last_day + timedelta(days=1), datetime.min.time())
+                    all_sets = await workout_set_repo.get_sets_for_date_range(
+                        session, user_id, start, end
+                    )
+            elif stats_date:
+                start = datetime.combine(stats_date, datetime.min.time())
+                if stats_end_date:
+                    end = datetime.combine(stats_end_date + timedelta(days=1), datetime.min.time())
+                else:
+                    end = datetime.combine(stats_date + timedelta(days=1), datetime.min.time())
+                all_sets = await workout_set_repo.get_sets_for_date_range(
+                    session, user_id, start, end
+                )
+            else:
+                all_sets = await workout_set_repo.get_latest_batches(session, user_id, limit=20)
 
             if not all_sets:
+                if stats_type == "last_session":
+                    return "No previous workouts found."
+                if stats_date:
+                    label = stats_date.strftime("%b %-d")
+                    if stats_end_date:
+                        label += f" – {stats_end_date.strftime('%b %-d')}"
+                    return f"No workouts found for {label}."
                 return "No workouts logged yet. Tell me about a workout to get started!"
 
-            # Group sets by date, keep adding until >= 3 distinct days
+            # Group sets by date
             days: OrderedDict[str, list] = OrderedDict()
-            for ws in reversed(all_sets):
+            for ws in (reversed(all_sets) if not stats_date and stats_type != "last_session" else all_sets):
                 date_key = ws.set_date.strftime("%a %b %-d")
                 days.setdefault(date_key, []).append(ws)
 
-            while len(days) > 3:
-                days.popitem(last=False)
+            # Only trim to 3 days for the default (no filter) case
+            if not stats_date and stats_type != "last_session":
+                while len(days) > 3:
+                    days.popitem(last=False)
 
             lines: list[str] = []
             for i, (date_key, day_sets) in enumerate(days.items()):

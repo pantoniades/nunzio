@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sys
+from urllib.parse import urlparse
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -76,6 +77,8 @@ class NunzioBot:
         app.add_handler(CommandHandler("start", self._on_start))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message))
 
+        llm_host = urlparse(config.llm.base_url).netloc
+        logger.info("Using %s on %s", config.llm.model, llm_host)
         logger.info("Starting Nunzio bot (polling)...")
         app.run_polling()
 
