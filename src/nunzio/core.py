@@ -355,7 +355,7 @@ class MessageHandler:
         """
         # Strip trigger words first
         stripped = re.sub(
-            r"\b(same as last time|repeat last|same thing|again|repeat)\b",
+            r"\b(same as last time|repeat last|same thing|another set|another|one more set|one more|again|repeat)\b",
             "",
             message,
             flags=re.IGNORECASE,

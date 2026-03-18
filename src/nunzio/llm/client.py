@@ -75,7 +75,7 @@ class LLMClient:
         - view_stats: User wants to see their workout history or statistics
         - list_workouts: User wants to see a list of recent workout sessions with IDs ("last workouts", "list workouts", "list sessions", "show sessions")
         - delete_workout: User wants to undo, delete, or remove a logged workout ("undo", "delete last", "remove session #42", "that's wrong")
-        - repeat_last: User wants to log the same workout again ("again", "repeat last", "same as last time")
+        - repeat_last: User wants to log the same workout again ("again", "repeat last", "same as last time", "another set", "one more", "one more set", "same thing")
         - coaching: User wants advice, recommendations, questions about training, or anything else
 
         For view_stats intent, also classify the stats_type:
@@ -130,7 +130,7 @@ class LLMClient:
                 return UserIntent(intent="delete_workout", confidence=0.7)
             elif any(
                 word in message_lower
-                for word in ["again", "repeat", "same as last"]
+                for word in ["again", "repeat", "same as last", "another", "one more", "same thing"]
             ):
                 return UserIntent(intent="repeat_last", confidence=0.7)
             elif any(
@@ -204,6 +204,15 @@ class LLMClient:
           "bench press at 100 lb shoulder sore" → exercise_name="Bench Press", notes="shoulder sore"
           "purple band chest pull" → exercise_name="Chest Pull", notes="purple band"
           "incline press felt easy" → exercise_name="Incline Press", notes="felt easy"
+        - BARE NUMBERS: When a single number follows an exercise name with no "reps", "sets",
+          or "x" notation (e.g. "face pull 30", "bench 185"), use exercise context to decide:
+          for exercises typically done with external weight (cable, barbell, dumbbell, machine),
+          treat the number as weight in pounds. For bodyweight exercises (pushups, pull-ups,
+          sit-ups), treat it as reps.
+          Examples:
+          "face pull 30" → weight=30, reps=null (cable exercise → weight)
+          "bench 185" → weight=185, reps=null (barbell exercise → weight)
+          "pushups 30" → weight=null, reps=30 (bodyweight exercise → reps)
         - DATE: If the user mentions when they did the workout (e.g. "yesterday", "on Monday",
           "last Friday", "Feb 15", "2 days ago"), resolve it to a concrete date and set the
           `date` field in YYYY-MM-DD format. If no date is mentioned, leave `date` as null.
