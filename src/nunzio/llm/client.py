@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import httpx
 import instructor
 from openai import AsyncOpenAI
 from tenacity import AsyncRetrying, retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -38,6 +39,7 @@ class LLMClient:
     def __init__(self) -> None:
         self._client: Optional[AsyncOpenAI] = None
         self._instructor_client: Optional[instructor.AsyncInstructor] = None
+        self.model_override: str | None = None
 
     async def initialize(self) -> None:
         """Initialize the LLM client."""
@@ -48,6 +50,26 @@ class LLMClient:
         self._instructor_client = instructor.from_openai(
             self._client, mode=instructor.Mode.JSON
         )
+
+    async def _get_active_model(self) -> str:
+        """Check llama-swap /running endpoint and use the currently loaded model if one is ready."""
+        try:
+            async with httpx.AsyncClient(timeout=2) as http:
+                resp = await http.get(f"{config.llm.base_url}/running")
+                resp.raise_for_status()
+                data = resp.json()
+                for entry in data:
+                    if entry.get("state") == "ready":
+                        model = entry["model"]
+                        if model != config.llm.model:
+                            self.model_override = model
+                        else:
+                            self.model_override = None
+                        return model
+        except Exception:
+            logger.debug("Could not check /running endpoint, using configured model")
+        self.model_override = None
+        return config.llm.model
 
     @retry(
         stop=stop_after_attempt(3),
@@ -105,8 +127,9 @@ class LLMClient:
         """
 
         try:
+            model = await self._get_active_model()
             result = await self._instructor_client.chat.completions.create(
-                model=config.llm.model,
+                model=model,
                 messages=[{"role": "user", "content": prompt}],
                 response_model=UserIntent,
                 temperature=0.1,
@@ -219,8 +242,9 @@ class LLMClient:
         """
 
         try:
+            model = await self._get_active_model()
             result = await self._instructor_client.chat.completions.create(
-                model=config.llm.model,
+                model=model,
                 messages=[{"role": "user", "content": prompt}],
                 response_model=WorkoutData,
                 temperature=0.1,
@@ -261,8 +285,9 @@ class LLMClient:
         """
 
         try:
+            model = await self._get_active_model()
             result = await self._instructor_client.chat.completions.create(
-                model=config.llm.model,
+                model=model,
                 messages=[{"role": "user", "content": prompt}],
                 response_model=BodyWeightData,
                 temperature=0.1,
@@ -300,8 +325,9 @@ class LLMClient:
             user_content = f"{context}\n\n---\nUSER QUESTION: {message}"
 
         try:
+            model = await self._get_active_model()
             response = await self._client.chat.completions.create(
-                model=config.llm.model,
+                model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},

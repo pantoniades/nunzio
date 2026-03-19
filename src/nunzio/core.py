@@ -6,6 +6,7 @@ import re
 from collections import OrderedDict
 from datetime import date as date_type, datetime, timedelta
 
+from .config import config
 from .database.connection import db_manager
 from .database.models import _now_nyc
 from .database.repository import body_weight_repo, exercise_repo, message_log_repo, workout_set_repo
@@ -55,6 +56,9 @@ class MessageHandler:
             response = await self._handle_repeat_last(message, user_id)
         else:
             response = await self._handle_coaching(message, intent, user_id)
+
+        if self._llm.model_override:
+            response += f"\n(using {self._llm.model_override} instead of configured {config.llm.model})"
 
         # Fire-and-forget message logging — failure must not block the response
         try:
