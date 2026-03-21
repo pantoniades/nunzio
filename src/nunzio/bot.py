@@ -46,6 +46,7 @@ class NunzioBot:
             return
 
         try:
+            await update.message.chat.send_action("typing")
             response = await self._handler.process(text, update.effective_user.id)
         except Exception:
             logger.exception("Error processing message from %s", update.effective_user.id)

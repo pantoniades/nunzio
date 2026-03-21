@@ -13,6 +13,7 @@ from tenacity import AsyncRetrying, retry, stop_after_attempt, wait_exponential,
 from ..config import config
 from .schemas import (
     BodyWeightData,
+    EditSetData,
     UserIntent,
     WorkoutData,
 )
@@ -98,6 +99,7 @@ class LLMClient:
         - list_workouts: User wants to see a list of recent workout sessions with IDs ("last workouts", "list workouts", "list sessions", "show sessions")
         - delete_workout: User wants to undo, delete, or remove a logged workout ("undo", "delete last", "remove session #42", "that's wrong")
         - repeat_last: User wants to log the same workout again ("again", "repeat last", "same as last time", "another set", "one more", "one more set", "same thing")
+        - edit_set: User wants to fix, change, or correct a value on an already-logged set ("change reps to 12", "fix weight to 185", "edit last set", "update bench press to 8 reps", "correct #42 set 3 to 200 lbs")
         - coaching: User wants advice, recommendations, questions about training, or anything else
 
         For view_stats intent, also classify the stats_type:
@@ -146,6 +148,11 @@ class LLMClient:
                 for word in ["weigh", "weighed", "body weight", "bw"]
             ):
                 return UserIntent(intent="log_weight", confidence=0.7)
+            elif any(
+                word in message_lower
+                for word in ["edit", "change", "fix", "correct", "update"]
+            ):
+                return UserIntent(intent="edit_set", confidence=0.7)
             elif any(
                 word in message_lower
                 for word in ["undo", "delete", "remove"]
@@ -296,6 +303,49 @@ class LLMClient:
             return result
         except Exception:
             logger.error("Body weight extraction failed", exc_info=True)
+            return None
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+    )
+    async def extract_edit_set_data(self, message: str) -> EditSetData | None:
+        """Extract edit-set instructions from user message."""
+        if not self._instructor_client:
+            await self.initialize()
+
+        prompt = f"""
+        Extract what the user wants to edit about a previously logged workout set.
+
+        MESSAGE: "{message}"
+
+        IMPORTANT:
+        - Identify WHICH set(s) to edit:
+          - "last set" / "last workout" → is_last=true
+          - "#42 set 3" / "batch 42 set 3" → batch_id=42, set_number=3
+          - "#42" (no set number) → batch_id=42, set_number=null (edit all sets in batch)
+          - "change bench press to 12 reps" → exercise_name="Bench Press", is_last=false
+        - Identify WHAT to change — only set the new_* fields the user explicitly mentions:
+          - "change reps to 12" → new_reps=12
+          - "fix weight to 185" → new_weight=185
+          - "update to 8 reps at 200 lbs" → new_reps=8, new_weight=200
+          - "change notes to felt easy" → new_notes="felt easy"
+        - Leave new_* fields as null when the user does NOT mention them.
+        - Default weight unit is lbs unless specified otherwise.
+        """
+
+        try:
+            model = await self._get_active_model()
+            result = await self._instructor_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                response_model=EditSetData,
+                temperature=0.1,
+                max_retries=_instructor_retries("extract_edit_set"),
+            )
+            return result
+        except Exception:
+            logger.error("Edit set extraction failed", exc_info=True)
             return None
 
     async def generate_coaching_response(self, message: str, context: str) -> str:

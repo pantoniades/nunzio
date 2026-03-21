@@ -207,6 +207,44 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
             await session.flush()
         return sets
 
+    async def get_batch_sets(
+        self, session: AsyncSession, batch_id: int, user_id: int, *, set_number: int | None = None
+    ) -> List[WorkoutSet]:
+        """Get sets from a specific batch, optionally filtered to one set_number."""
+        stmt = (
+            select(WorkoutSet)
+            .options(selectinload(WorkoutSet.exercise))
+            .where(WorkoutSet.user_id == user_id)
+            .where(WorkoutSet.batch_id == batch_id)
+        )
+        if set_number is not None:
+            stmt = stmt.where(WorkoutSet.set_number == set_number)
+        stmt = stmt.order_by(WorkoutSet.set_number)
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_latest_sets_for_exercise(
+        self, session: AsyncSession, exercise_id: int, user_id: int
+    ) -> List[WorkoutSet]:
+        """Get all sets from the most recent batch containing the given exercise."""
+        # Find the latest batch_id that has this exercise
+        batch_sub = (
+            select(func.max(WorkoutSet.batch_id))
+            .where(WorkoutSet.user_id == user_id)
+            .where(WorkoutSet.exercise_id == exercise_id)
+            .scalar_subquery()
+        )
+        stmt = (
+            select(WorkoutSet)
+            .options(selectinload(WorkoutSet.exercise))
+            .where(WorkoutSet.user_id == user_id)
+            .where(WorkoutSet.batch_id == batch_sub)
+            .where(WorkoutSet.exercise_id == exercise_id)
+            .order_by(WorkoutSet.set_number)
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get_latest_batches(
         self, session: AsyncSession, user_id: int, *, limit: int = 10
     ) -> List[WorkoutSet]:

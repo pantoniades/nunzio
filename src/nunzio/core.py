@@ -50,6 +50,8 @@ class MessageHandler:
             response = await self._handle_view_stats(intent, user_id)
         elif intent.intent == "list_workouts":
             response = await self._handle_list_workouts(user_id)
+        elif intent.intent == "edit_set":
+            response = await self._handle_edit_set(message, user_id)
         elif intent.intent == "delete_workout":
             response = await self._handle_delete_workout(message, user_id)
         elif intent.intent == "repeat_last":
@@ -350,6 +352,91 @@ class MessageHandler:
             date_str = deleted[0].set_date.strftime("%b %-d")
             ex_str = ", ".join(exercises) if exercises else "no exercises"
             return f"Deleted workout #{batch_id} ({date_str}): {ex_str} — {len(deleted)} sets removed."
+
+    async def _handle_edit_set(self, message: str, user_id: int) -> str:
+        """Edit one or more sets — by batch_id, exercise name, or 'last'."""
+        data = await self._llm.extract_edit_set_data(message)
+        if not data:
+            return "I couldn't understand what to edit. Try: 'change last set to 12 reps' or 'fix #42 weight to 185'."
+
+        # Build update dict from non-None new_* fields
+        updates: dict[str, object] = {}
+        field_map = {
+            "new_reps": "reps",
+            "new_weight": "weight",
+            "new_weight_unit": "weight_unit",
+            "new_duration_minutes": "duration_minutes",
+            "new_distance": "distance",
+            "new_notes": "notes",
+        }
+        for src, dst in field_map.items():
+            val = getattr(data, src)
+            if val is not None:
+                updates[dst] = val
+
+        if not updates:
+            return "I couldn't figure out what to change. Specify new reps, weight, or notes."
+
+        async with db_manager.get_session() as session:
+            # Resolve target sets
+            target_sets = []
+
+            if data.batch_id:
+                target_sets = await workout_set_repo.get_batch_sets(
+                    session, data.batch_id, user_id, set_number=data.set_number
+                )
+                if not target_sets:
+                    return f"Workout #{data.batch_id} not found (or not yours)."
+
+            elif data.exercise_name:
+                # Resolve exercise name
+                exercise = await exercise_repo.get_by_name(session, data.exercise_name)
+                if not exercise:
+                    scored = await exercise_repo.search_scored(session, data.exercise_name)
+                    if scored and scored[0][1] >= 0.3:
+                        exercise = scored[0][0]
+                if not exercise:
+                    return f"Exercise '{data.exercise_name}' not found."
+                target_sets = await workout_set_repo.get_latest_sets_for_exercise(
+                    session, exercise.id, user_id
+                )
+                if not target_sets:
+                    return f"No logged sets for {exercise.name}."
+
+            else:
+                # Default: last batch
+                target_sets = await workout_set_repo.get_latest_batch_for_user(session, user_id)
+                if not target_sets:
+                    return "Nothing to edit — no workouts found."
+
+            # Capture before state and apply updates
+            batch_id = target_sets[0].batch_id
+            change_lines: list[str] = []
+            for ws in target_sets:
+                name = ws.exercise.name if ws.exercise else f"exercise #{ws.exercise_id}"
+                befores: list[str] = []
+                afters: list[str] = []
+
+                for field, new_val in updates.items():
+                    old_val = getattr(ws, field)
+                    if field in ("weight", "reps"):
+                        old_display = f"{old_val:g}" if isinstance(old_val, float) else str(old_val) if old_val is not None else "none"
+                        new_display = f"{new_val:g}" if isinstance(new_val, float) else str(new_val)
+                        befores.append(old_display)
+                        afters.append(new_display)
+                    setattr(ws, field, new_val)
+
+                await session.flush()
+
+                if befores:
+                    change_lines.append(f"  {name} set {ws.set_number}: {' / '.join(befores)} → {' / '.join(afters)}")
+                else:
+                    change_lines.append(f"  {name} set {ws.set_number}: updated")
+
+        n = len(target_sets)
+        set_word = "set" if n == 1 else "sets"
+        header = f"Edited {n} {set_word} in #{batch_id}:"
+        return "\n".join([header] + change_lines)
 
     @staticmethod
     def _parse_repeat_modifiers(message: str) -> dict:

@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 class UserIntent(BaseModel):
     """User intent classification with exercise/muscle group extraction."""
-    intent: Literal["log_workout", "view_stats", "list_workouts", "coaching", "delete_workout", "repeat_last", "log_weight"] = Field(
+    intent: Literal["log_workout", "view_stats", "list_workouts", "coaching", "delete_workout", "repeat_last", "log_weight", "edit_set"] = Field(
         description="Primary user intention"
     )
     confidence: float = Field(
@@ -97,6 +97,50 @@ class WorkoutData(BaseModel):
     perceived_exertion: Optional[int] = Field(
         default=None,
         description="RPE scale 1-10"
+    )
+
+
+class EditSetData(BaseModel):
+    """Extracted edit-set instruction."""
+    batch_id: Optional[int] = Field(
+        default=None,
+        description="Batch/workout ID to edit (e.g. from '#42'). Null if not specified.",
+    )
+    set_number: Optional[int] = Field(
+        default=None,
+        description="Specific set number within the batch to edit. Null to edit all sets in the batch.",
+    )
+    exercise_name: Optional[str] = Field(
+        default=None,
+        description="Exercise name to identify which sets to edit (e.g. 'bench press'). Used when no batch_id given.",
+    )
+    is_last: bool = Field(
+        default=False,
+        description="True when the user refers to 'last set', 'last workout', or most recent batch.",
+    )
+    new_reps: Optional[int] = Field(
+        default=None,
+        description="New reps value, only if the user wants to change reps.",
+    )
+    new_weight: Optional[float] = Field(
+        default=None,
+        description="New weight value, only if the user wants to change weight.",
+    )
+    new_weight_unit: Optional[Literal["lbs", "kg"]] = Field(
+        default=None,
+        description="New weight unit, only if specified.",
+    )
+    new_duration_minutes: Optional[int] = Field(
+        default=None,
+        description="New duration in minutes, only if the user wants to change duration.",
+    )
+    new_distance: Optional[float] = Field(
+        default=None,
+        description="New distance, only if the user wants to change distance.",
+    )
+    new_notes: Optional[str] = Field(
+        default=None,
+        description="New notes, only if the user wants to change notes.",
     )
 
 
