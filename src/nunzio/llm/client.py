@@ -20,6 +20,15 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Resident models we trust for Instructor JSON mode and coaching responses.
+# A different ready model on llama-swap is only reused if it's in this set;
+# otherwise we force a swap back to the configured default.
+_RESIDENT_MODEL_ALLOWLIST: frozenset[str] = frozenset({
+    "qwen3.5-27b",
+    "qwen3-coder-30b",
+    "gemma-4-27b",
+})
+
 
 def _instructor_retries(label: str, attempts: int = 3) -> AsyncRetrying:
     """Build a tenacity AsyncRetrying that logs each instructor JSON-parse retry."""
@@ -41,6 +50,7 @@ class LLMClient:
         self._client: Optional[AsyncOpenAI] = None
         self._instructor_client: Optional[instructor.AsyncInstructor] = None
         self.model_override: str | None = None
+        self._last_logged_model: str | None = None
 
     async def initialize(self) -> None:
         """Initialize the LLM client."""
@@ -52,25 +62,52 @@ class LLMClient:
             self._client, mode=instructor.Mode.JSON
         )
 
+    @staticmethod
+    def _pick_model_from_running(running: list[dict], configured: str) -> tuple[str, bool]:
+        """Choose an active model from llama-swap /running entries.
+
+        Reuses a resident model only if it's the configured one or in the
+        JSON-mode allowlist. Returns (chosen_model, is_override).
+        """
+        ready = next((e for e in running if e.get("state") == "ready"), None)
+        if not ready:
+            return configured, False
+
+        model = ready.get("model")
+        if not model or model == configured:
+            return configured, False
+        if model in _RESIDENT_MODEL_ALLOWLIST:
+            return model, True
+        return configured, False
+
     async def _get_active_model(self) -> str:
-        """Check llama-swap /running endpoint and use the currently loaded model if one is ready."""
+        """Check llama-swap /running and reuse a resident model when safe."""
         try:
             async with httpx.AsyncClient(timeout=2) as http:
                 resp = await http.get(f"{config.llm.base_url}/running")
                 resp.raise_for_status()
-                data = resp.json()
-                for entry in data:
-                    if entry.get("state") == "ready":
-                        model = entry["model"]
-                        if model != config.llm.model:
-                            self.model_override = model
-                        else:
-                            self.model_override = None
-                        return model
-        except Exception:
-            logger.debug("Could not check /running endpoint, using configured model")
-        self.model_override = None
-        return config.llm.model
+                running = resp.json().get("running", [])
+        except Exception as e:
+            logger.warning(
+                "Could not check /running endpoint (%s); using configured model %s",
+                e, config.llm.model,
+            )
+            self.model_override = None
+            return config.llm.model
+
+        chosen, is_override = self._pick_model_from_running(running, config.llm.model)
+        self.model_override = chosen if is_override else None
+
+        if chosen != self._last_logged_model:
+            if is_override:
+                logger.info(
+                    "Using resident model %s (override; configured %s)",
+                    chosen, config.llm.model,
+                )
+            else:
+                logger.info("Active model: %s", chosen)
+            self._last_logged_model = chosen
+        return chosen
 
     @retry(
         stop=stop_after_attempt(3),

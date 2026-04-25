@@ -26,7 +26,10 @@ What works:
 - `nunzio` (CLI) and `nunzio-bot` (Telegram) entry points via pyproject.toml
 - Containerfile for Podman deployment (runs the bot by default)
 - Delete/undo workouts: "undo", "delete last", "delete #42" — routed via `delete_workout` intent
-- Repeat last workout: "again", "repeat last" — clones most recent batch via `repeat_last` intent
+- Edit individual sets: "change reps to 12", "fix weight to 185", "edit last set" — routed via `edit_set` intent (LLM extracts which set + what to change)
+- Body weight tracking: "weighed 191.4 lb" — routed via `log_weight` intent, persisted in `body_weight` table, weigh-in trends shown on log
+- Repeat last workout: "again", "repeat last" — clones most recent batch via `repeat_last` intent. Inline override syntax: "again 10x55" or "Another, 10x50 kg" applies reps and weight overrides (regex-parsed, no LLM call)
+- Resident-model reuse: when llama-swap has a model from the JSON-mode allowlist (`qwen3.5-27b`, `qwen3-coder-30b`, `gemma-4-27b`) already loaded, Nunzio uses it to skip swap latency. Other resident models force a swap back to the configured default. Override is shown in the response footer and logged at INFO on transitions.
 - Scored exercise matching: word-overlap Jaccard replaces ILIKE `%query%`. Exact match → use it, score ≥ 0.5 → use it (show mapping), score < 0.5 → create ad-hoc exercise with user's exact name
 - Raw exercise name preserved: `workout_sets.raw_exercise_name` stores what the user actually said. Response shows mapping when names differ (e.g. `Dumbbell Flyes (from "dumbbell fly")`)
 - Set-level notes pass through from LLM extraction to DB
@@ -78,9 +81,9 @@ This context block is injected into the user message alongside a coaching system
 - ~~**Sensible defaults for missing reps.**~~ **Done (v0.4).** Missing reps default
   to 10 for strength sets; "(assumed)" shown in response. Cardio sets with
   `duration_minutes` are skipped. Follow-up prompting deferred (needs conversation state).
-- **Edit individual sets.** Delete/undo works at session level. Still no way to edit
-  a single set within a session (change weight, fix reps). Could be "edit set #3 to 12 reps"
-  or "change weight on last set to 40 lbs".
+- ~~**Edit individual sets.**~~ **Done.** `edit_set` intent routes "change reps to 12",
+  "fix weight to 185", "edit last set", "#42 set 3 to 200 lbs" through Instructor
+  extraction (`EditSetData` schema) to a repository update.
 - **Per-user timezone preferences.** Currently hardcoded to America/New_York. Needs a
   `user_settings` table with `timezone` column. Defer until multi-user is actually needed.
 - ~~**Specify Dates.**~~ **Done (v0.6).** Today's date injected into extraction prompt;
@@ -113,11 +116,20 @@ This context block is injected into the user message alongside a coaching system
   in coaching context. Session-level notes from freeform text (e.g. "shoulder hurt")
   aren't extracted separately — the raw message is stored as session notes, which is
   a rough approximation.
-- **Body weight tracking.** New intent: "weighed 191.4 lb" saves the user's weight with
-  timestamp. New `body_weight` table: `user_id`, `weight`, `unit`, `recorded_at`. Needs
-  a new intent in classification (e.g. `log_weight`), a simple extraction model, and a
-  way to view history ("what's my weight trend?"). Could tie into coaching context too —
-  the LLM knowing the user's weight trend is useful for advice.
+- ~~**Body weight tracking.**~~ **Done.** `log_weight` intent + `body_weight` table
+  (`user_id`, `weight`, `unit`, `recorded_at`, `notes`). Weigh-in delta vs. previous
+  reading is shown on log ("↓ 2.3 lbs from last weigh-in on Mar 21"). View via
+  `view_stats` with `stats_type="weight"`.
+- **Per-user settings table.** No `user_settings` table exists. The Apr 21 "Store as lb,
+  not kg" message hit the coaching path and the LLM hallucinated compliance — but the
+  next log was still in kg. Needs a real `user_settings` table (timezone, weight_unit)
+  plus a `set_preference` intent so preference statements stop falling through to
+  coaching. Until then, the coaching system prompt should at least say "I can't change
+  settings yet" instead of pretending to save them.
+- **Bare "Edit" with no target.** "Edit" alone returns "I couldn't figure out what to
+  change", forcing the user to retype the full command. Needs at minimum a default
+  scope (most recent set) plus a prompt for the value. A real fix needs conversation
+  state.
 - ~~Richer stats (PRs, volume trends, per-exercise history)~~ **Done (v0.5).** `view_stats`
   sub-routes by `stats_type`. PRs, exercise history, weekly volume by muscle group,
   consistency metrics (streak, avg gap, 30/90-day counts).

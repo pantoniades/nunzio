@@ -7,6 +7,7 @@ parse = MessageHandler._parse_repeat_modifiers
 
 def test_plain_again():
     m = parse("again")
+    assert m["reps"] is None
     assert m["weight"] is None
     assert m["times"] == 1
     assert m["note"] is None
@@ -84,3 +85,40 @@ def test_note_preserved():
     assert m["weight"] is None
     assert m["times"] == 1
     assert m["note"] == "elbow feels better"
+
+
+def test_reps_x_weight():
+    m = parse("again 10x55")
+    assert m["reps"] == 10
+    assert m["weight"] == 55.0
+    assert m["weight_unit"] == "lbs"
+    assert m["times"] == 1
+    assert m["note"] is None
+
+
+def test_reps_x_weight_with_unit():
+    m = parse("again 8x100 kg")
+    assert m["reps"] == 8
+    assert m["weight"] == 100.0
+    assert m["weight_unit"] == "kg"
+
+
+def test_reps_x_weight_with_spaces():
+    m = parse("another 10 x 50")
+    assert m["reps"] == 10
+    assert m["weight"] == 50.0
+    assert m["weight_unit"] == "lbs"
+
+
+def test_reps_x_weight_with_comma():
+    m = parse("Another, 10x55")
+    assert m["reps"] == 10
+    assert m["weight"] == 55.0
+    assert m["note"] is None
+
+
+def test_reps_x_weight_with_note():
+    m = parse("again 10x50, knee felt better")
+    assert m["reps"] == 10
+    assert m["weight"] == 50.0
+    assert m["note"] == "knee felt better"
