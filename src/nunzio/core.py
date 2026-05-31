@@ -1,17 +1,24 @@
 """Core message processing — shared by CLI and Telegram bot."""
 
-import asyncio
 import logging
 import re
 from collections import OrderedDict
-from datetime import date as date_type, datetime, timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import config
 from .database.connection import db_manager
-from .database.models import _now_nyc
-from .database.repository import body_weight_repo, exercise_repo, message_log_repo, workout_set_repo
+from .database.models import now_in_tz
+from .database.repository import (
+    body_weight_repo,
+    exercise_repo,
+    message_log_repo,
+    user_settings_repo,
+    workout_set_repo,
+)
 from .llm.client import LLMClient
 from .llm.context import build_coaching_context
+from .stats import compute_consistency
 
 logger = logging.getLogger(__name__)
 
@@ -32,22 +39,30 @@ class MessageHandler:
         await db_manager.close()
 
     async def process(self, message: str, user_id: int) -> str:
-        """Classify intent and route to the appropriate handler.
+        """Classify intent, then route to the appropriate handler.
 
-        Runs classification and workout extraction in parallel so log_workout
-        (the most common intent) doesn't pay for two sequential LLM calls.
+        We classify first and extract lazily inside the routed handler, rather
+        than running classification and workout extraction concurrently. This
+        means we only pay for the one extraction the routed intent needs,
+        instead of firing a workout extraction on every message (including
+        stats, coaching, and delete) — wasted load on a single-GPU backend.
         """
-        intent, workout_data = await asyncio.gather(
-            self._llm.classify_intent(message),
-            self._llm.extract_workout_data(message),
-        )
+        # Resolve the user's timezone once, up front, so date words ("yesterday",
+        # "today") in this message resolve in the zone they're currently in.
+        async with db_manager.get_session() as session:
+            user_tz = await user_settings_repo.get_timezone(session, user_id)
+
+        intent = await self._llm.classify_intent(message, user_tz)
 
         if intent.intent == "log_workout" and intent.confidence > 0.5:
-            response = await self._handle_log_workout(message, user_id, workout_data=workout_data)
+            # _handle_log_workout extracts the workout data itself (sequentially).
+            response = await self._handle_log_workout(message, user_id, user_tz)
         elif intent.intent == "log_weight":
-            response = await self._handle_log_weight(message, user_id)
+            response = await self._handle_log_weight(message, user_id, user_tz)
+        elif intent.intent == "set_timezone":
+            response = await self._handle_set_timezone(intent, user_id)
         elif intent.intent == "view_stats":
-            response = await self._handle_view_stats(intent, user_id)
+            response = await self._handle_view_stats(intent, user_id, user_tz)
         elif intent.intent == "list_workouts":
             response = await self._handle_list_workouts(user_id)
         elif intent.intent == "edit_set":
@@ -55,9 +70,9 @@ class MessageHandler:
         elif intent.intent == "delete_workout":
             response = await self._handle_delete_workout(message, user_id)
         elif intent.intent == "repeat_last":
-            response = await self._handle_repeat_last(message, user_id)
+            response = await self._handle_repeat_last(message, user_id, user_tz)
         else:
-            response = await self._handle_coaching(message, intent, user_id)
+            response = await self._handle_coaching(message, intent, user_id, user_tz)
 
         if self._llm.model_override:
             response += f"\n(using {self._llm.model_override} instead of configured {config.llm.model})"
@@ -104,9 +119,11 @@ class MessageHandler:
                 expanded.append(ex)
         return expanded
 
-    async def _handle_log_workout(self, message: str, user_id: int, *, workout_data=None) -> str:
+    async def _handle_log_workout(
+        self, message: str, user_id: int, user_tz: str = "America/New_York", *, workout_data=None
+    ) -> str:
         if workout_data is None:
-            workout_data = await self._llm.extract_workout_data(message)
+            workout_data = await self._llm.extract_workout_data(message, user_tz)
         if not workout_data or not workout_data.exercises:
             return "I couldn't extract workout details. Try something like: '3 sets of bench press at 185 lbs, 10 reps'"
 
@@ -124,9 +141,9 @@ class MessageHandler:
         async with db_manager.get_session() as session:
             batch_id = await workout_set_repo.get_next_batch_id(session, user_id)
             if workout_data.date:
-                now = datetime.combine(workout_data.date, _now_nyc().time())
+                now = datetime.combine(workout_data.date, now_in_tz(user_tz).time())
             else:
-                now = _now_nyc()
+                now = now_in_tz(user_tz)
 
             logged: list[str] = []
             logged_set_data: list[dict] = []
@@ -212,7 +229,7 @@ class MessageHandler:
 
         comment = self._generate_log_comment(logged_set_data, history, now)
 
-        if workout_data.date and workout_data.date != date_type.today():
+        if workout_data.date and workout_data.date != now_in_tz(user_tz).date():
             date_label = workout_data.date.strftime("%b %-d")
             header = f"Logged workout (#{batch_id}) for {date_label}:" if self._verbose else f"Logged for {date_label}:"
         else:
@@ -508,7 +525,9 @@ class MessageHandler:
 
         return {"reps": reps, "weight": weight, "weight_unit": weight_unit, "times": times, "note": note}
 
-    async def _handle_repeat_last(self, message: str, user_id: int) -> str:
+    async def _handle_repeat_last(
+        self, message: str, user_id: int, user_tz: str = "America/New_York"
+    ) -> str:
         """Repeat the user's most recent workout, with optional modifiers."""
         mods = self._parse_repeat_modifiers(message)
 
@@ -518,7 +537,7 @@ class MessageHandler:
                 return "Nothing to repeat — no previous workouts found."
 
             old_batch_id = last_sets[0].batch_id
-            now = _now_nyc()
+            now = now_in_tz(user_tz)
             sorted_sets = sorted(last_sets, key=lambda s: (s.exercise_id, s.set_number))
 
             logged: list[str] = []
@@ -575,7 +594,9 @@ class MessageHandler:
             return f"{w_str} {unit}"
         return w_str
 
-    async def _handle_view_stats(self, intent, user_id: int) -> str:
+    async def _handle_view_stats(
+        self, intent, user_id: int, user_tz: str = "America/New_York"
+    ) -> str:
         stats_type = getattr(intent, "stats_type", None) or "overview"
         if stats_type == "prs":
             return await self._handle_prs(user_id)
@@ -584,13 +605,15 @@ class MessageHandler:
         elif stats_type == "volume":
             return await self._handle_volume_trends(user_id)
         elif stats_type == "consistency":
-            return await self._handle_consistency(user_id)
+            return await self._handle_consistency(user_id, user_tz)
         elif stats_type == "weight":
             return await self._handle_weight_trend(user_id)
         else:
-            return await self._handle_overview(user_id, intent)
+            return await self._handle_overview(user_id, intent, user_tz)
 
-    async def _handle_overview(self, user_id: int, intent=None) -> str:
+    async def _handle_overview(
+        self, user_id: int, intent=None, user_tz: str = "America/New_York"
+    ) -> str:
         """Stats overview with optional date filtering.
 
         - last_session: all sets from the most recent workout day before today
@@ -605,7 +628,7 @@ class MessageHandler:
             if stats_type == "last_session":
                 # Find the most recent workout day before today, return all sets from it
                 recent = await workout_set_repo.get_latest_batches(session, user_id, limit=50)
-                today = _now_nyc().date()
+                today = now_in_tz(user_tz).date()
                 last_day = None
                 for ws in recent:
                     d = ws.set_date.date() if isinstance(ws.set_date, datetime) else ws.set_date
@@ -798,13 +821,16 @@ class MessageHandler:
 
             return "\n".join(lines)
 
-    async def _handle_consistency(self, user_id: int) -> str:
+    async def _handle_consistency(
+        self, user_id: int, user_tz: str = "America/New_York"
+    ) -> str:
         """Show workout frequency, streak, and consistency metrics."""
+        today = now_in_tz(user_tz).date()
         async with db_manager.get_session() as session:
             dates_90 = await workout_set_repo.get_workout_dates(session, user_id, days=90)
-            dates_30 = [d for d in dates_90 if (datetime.now().date() - d).days <= 30]
+            dates_30 = [d for d in dates_90 if (today - d).days <= 30]
 
-        stats = self._compute_consistency(dates_90, dates_30)
+        stats = self._compute_consistency(dates_90, dates_30, today)
         lines: list[str] = ["Consistency:"]
         lines.append(f"  Last 30 days: {stats['count_30d']} workouts")
         lines.append(f"  Last 90 days: {stats['count_90d']} workouts")
@@ -818,45 +844,7 @@ class MessageHandler:
 
         return "\n".join(lines)
 
-    @staticmethod
-    def _compute_consistency(
-        dates_90: list, dates_30: list
-    ) -> dict:
-        """Compute consistency metrics from workout date lists.
-
-        Returns dict with count_30d, count_90d, avg_gap, streak, days_since_last.
-        """
-        today = date_type.today()
-        count_30d = len(dates_30)
-        count_90d = len(dates_90)
-
-        avg_gap = None
-        if count_90d >= 2:
-            sorted_dates = sorted(dates_90)
-            gaps = [(sorted_dates[i + 1] - sorted_dates[i]).days for i in range(len(sorted_dates) - 1)]
-            avg_gap = sum(gaps) / len(gaps)
-
-        # Current streak: count consecutive days working backwards from today
-        streak = 0
-        if dates_90:
-            sorted_dates = sorted(dates_90, reverse=True)
-            expected = today
-            for d in sorted_dates:
-                if d == expected:
-                    streak += 1
-                    expected = expected - timedelta(days=1)
-                elif d < expected:
-                    break
-
-        days_since_last = (today - max(dates_90)).days if dates_90 else None
-
-        return {
-            "count_30d": count_30d,
-            "count_90d": count_90d,
-            "avg_gap": avg_gap,
-            "streak": streak,
-            "days_since_last": days_since_last,
-        }
+    _compute_consistency = staticmethod(compute_consistency)
 
     async def _handle_list_workouts(self, user_id: int) -> str:
         """Show last 10 workouts with batch IDs for use with delete."""
@@ -889,16 +877,18 @@ class MessageHandler:
 
             return "\n".join(lines)
 
-    async def _handle_log_weight(self, message: str, user_id: int) -> str:
+    async def _handle_log_weight(
+        self, message: str, user_id: int, user_tz: str = "America/New_York"
+    ) -> str:
         """Log a body weight reading."""
-        data = await self._llm.extract_body_weight_data(message)
+        data = await self._llm.extract_body_weight_data(message, user_tz)
         if not data:
             return "I couldn't extract a weight reading. Try something like: 'weighed 185 lbs'"
 
         if data.date:
-            recorded_at = datetime.combine(data.date, _now_nyc().time())
+            recorded_at = datetime.combine(data.date, now_in_tz(user_tz).time())
         else:
-            recorded_at = _now_nyc()
+            recorded_at = now_in_tz(user_tz)
 
         async with db_manager.get_session() as session:
             previous = await body_weight_repo.get_latest(session, user_id)
@@ -920,7 +910,7 @@ class MessageHandler:
         if data.notes:
             parts[0] = f"Logged {w_str} ({data.notes})."
 
-        if data.date and data.date != date_type.today():
+        if data.date and data.date != now_in_tz(user_tz).date():
             date_label = data.date.strftime("%b %-d")
             parts[0] = parts[0].rstrip(".") + f" for {date_label}."
 
@@ -962,7 +952,35 @@ class MessageHandler:
 
         return "\n".join(lines)
 
-    async def _handle_coaching(self, message: str, intent, user_id: int) -> str:
+    async def _handle_set_timezone(self, intent, user_id: int) -> str:
+        """Set the user's timezone preference from the classified intent."""
+        tz_name = getattr(intent, "mentioned_timezone", None)
+        if not tz_name:
+            return (
+                "Which timezone? Tell me a place or zone, e.g. "
+                "\"set my timezone to Tokyo\" or \"I'm in London now\"."
+            )
+
+        # Validate against the IANA database before storing.
+        try:
+            tz = ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            return (
+                f"I don't recognize the timezone \"{tz_name}\". Try a city or an "
+                "IANA name like \"Europe/London\" or \"America/Denver\"."
+            )
+
         async with db_manager.get_session() as session:
-            context = await build_coaching_context(session, intent, message, user_id)
+            await user_settings_repo.set_timezone(session, user_id, tz_name)
+
+        local_now = datetime.now(tz).strftime("%-I:%M %p")
+        return f"Timezone set to {tz_name} — it's {local_now} there now."
+
+    async def _handle_coaching(
+        self, message: str, intent, user_id: int, user_tz: str = "America/New_York"
+    ) -> str:
+        async with db_manager.get_session() as session:
+            context = await build_coaching_context(
+                session, intent, message, user_id, user_tz
+            )
             return await self._llm.generate_coaching_response(message, context)

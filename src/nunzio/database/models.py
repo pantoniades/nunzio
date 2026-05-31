@@ -17,10 +17,26 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 NYC_TZ = ZoneInfo("America/New_York")
+DEFAULT_TZ = "America/New_York"
 
 
 def _now_nyc() -> datetime:
     return datetime.now(NYC_TZ).replace(tzinfo=None)
+
+
+def now_in_tz(tz_name: str) -> datetime:
+    """Current wall-clock time in the given IANA timezone, as a naive datetime.
+
+    Falls back to America/New_York if the zone name is invalid. User-facing
+    timestamps (set_date, recorded_at) are stored as naive local time in the
+    user's own zone; this mirrors the long-standing _now_nyc() convention but
+    makes the zone a per-user choice.
+    """
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = NYC_TZ
+    return datetime.now(tz).replace(tzinfo=None)
 
 
 class Base(DeclarativeBase):
@@ -174,3 +190,23 @@ class TrainingPrinciple(Base):
 
     def __repr__(self) -> str:
         return f"<TrainingPrinciple(id={self.id}, category='{self.category}', title='{self.title}')>"
+
+
+class UserSettings(Base):
+    """Per-user preferences. Currently just timezone, keyed by user_id."""
+
+    __tablename__ = "user_settings"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    timezone: Mapped[str] = mapped_column(
+        String(64), nullable=False, default=DEFAULT_TZ
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_now_nyc
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_now_nyc, onupdate=_now_nyc
+    )
+
+    def __repr__(self) -> str:
+        return f"<UserSettings(user_id={self.user_id}, timezone='{self.timezone}')>"

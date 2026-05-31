@@ -7,7 +7,16 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .models import Base, BodyWeight, Exercise, MessageLog, TrainingPrinciple, WorkoutSet
+from .models import (
+    Base,
+    BodyWeight,
+    DEFAULT_TZ,
+    Exercise,
+    MessageLog,
+    TrainingPrinciple,
+    UserSettings,
+    WorkoutSet,
+)
 
 ModelType = TypeVar("ModelType", bound=Base)
 CreateSchemaType = TypeVar("CreateSchemaType")
@@ -501,9 +510,34 @@ class MessageLogRepository(BaseRepository[MessageLog, dict, dict]):
         return list(result.scalars().all())
 
 
+class UserSettingsRepository(BaseRepository[UserSettings, dict, dict]):
+    """Repository for per-user settings (timezone, etc.)."""
+
+    async def get_timezone(self, session: AsyncSession, user_id: int) -> str:
+        """Return the user's stored IANA timezone, or the default if unset."""
+        stmt = select(UserSettings.timezone).where(UserSettings.user_id == user_id)
+        result = await session.execute(stmt)
+        tz = result.scalar_one_or_none()
+        return tz or DEFAULT_TZ
+
+    async def set_timezone(
+        self, session: AsyncSession, user_id: int, timezone: str
+    ) -> None:
+        """Upsert the user's timezone preference."""
+        stmt = select(UserSettings).where(UserSettings.user_id == user_id)
+        result = await session.execute(stmt)
+        settings = result.scalar_one_or_none()
+        if settings is None:
+            session.add(UserSettings(user_id=user_id, timezone=timezone))
+        else:
+            settings.timezone = timezone
+        await session.flush()
+
+
 # Repository instances
 exercise_repo = ExerciseRepository(Exercise)
 workout_set_repo = WorkoutSetRepository(WorkoutSet)
 body_weight_repo = BodyWeightRepository(BodyWeight)
 training_principle_repo = TrainingPrincipleRepository(TrainingPrinciple)
 message_log_repo = MessageLogRepository(MessageLog)
+user_settings_repo = UserSettingsRepository(UserSettings)

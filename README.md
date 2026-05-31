@@ -11,7 +11,8 @@ Two interfaces: interactive CLI for local use, Telegram bot for mobile (at the g
 - Undo/delete workouts ("undo", "delete last", "delete #42")
 - Repeat last workout ("again", "repeat last")
 - Smart exercise matching — word-overlap scoring replaces naive substring search. Unknown exercises get created as-is instead of being force-mapped to the wrong catalog entry. Matched names show the mapping ("Dumbbell Flyes (from 'dumbbell fly')")
-- Context-aware coaching based on your actual workout history, exercise guidance, and training principles
+- Context-aware coaching based on your actual workout history, volume trends, consistency, body-weight trend, exercise guidance, and training principles
+- Per-user timezone, settable in chat ("set my timezone to Tokyo", "I'm in London now") — relative dates like "yesterday" resolve in your current zone
 - Intent classification with exercise and muscle group extraction in a single LLM call
 - Exercise catalog with 29 exercises across 9 muscle groups (including cardio)
 - Training principles (progression, deload, rep ranges, volume, etc.) injected into coaching prompts
@@ -90,6 +91,9 @@ podman run --env-file .env nunzio
 
 The container runs the Telegram bot by default.
 
+To run it **full-time** (auto-start on boot, restart on crash) via systemd +
+Podman Quadlet, see [`deploy/README.md`](deploy/README.md).
+
 ### Example usage
 
 ```
@@ -120,9 +124,11 @@ If you have an existing database, run migrations instead of recreating tables:
 ```bash
 python scripts/migrate_v03.py   # v0.2 → v0.3: adds raw_exercise_name + message_log
 python scripts/migrate_v05.py   # v0.3/v0.4 → v0.5: flattens sessions into sets
+python scripts/migrate_v07.py   # → v0.7: adds user_settings (per-user timezone)
 ```
 
-Both are idempotent — safe to run multiple times.
+All are idempotent — safe to run multiple times. `migrate_v07.py` is
+non-destructive (only creates the new `user_settings` table).
 
 ## Configuration
 

@@ -1,20 +1,28 @@
 """Coaching context assembly — pulls history, guidance, and principles into a prompt block."""
 
+from collections import OrderedDict
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..database.models import now_in_tz
 from ..database.repository import (
     body_weight_repo,
     exercise_repo,
     training_principle_repo,
     workout_set_repo,
 )
+from ..stats import compute_consistency
 from .schemas import UserIntent
 
 CARDIO_GROUPS = {"cardio"}
 
 
 async def build_coaching_context(
-    session: AsyncSession, intent: UserIntent, message: str, user_id: int
+    session: AsyncSession,
+    intent: UserIntent,
+    message: str,
+    user_id: int,
+    user_tz: str = "America/New_York",
 ) -> str:
     """Assemble exercise history, guidance, and training principles into a prompt-ready string."""
 
@@ -61,16 +69,26 @@ async def build_coaching_context(
             principle_lines.append(f"[{p.category}] {p.title}: {p.content}")
         sections.append("\n".join(principle_lines))
 
-    # 5. Exercise details with history
+    # 5. Consistency snapshot — how often / how recently the user is training
+    consistency_section = await _build_consistency_section(session, user_id, user_tz)
+    if consistency_section:
+        sections.append(consistency_section)
+
+    # 6. Weekly volume trend by muscle group
+    volume_section = await _build_volume_section(session, user_id)
+    if volume_section:
+        sections.append(volume_section)
+
+    # 7. Exercise details with history
     for exercise in matched_exercises:
         ex_lines = [f"EXERCISE: {exercise.name}"]
 
         if exercise.guidance:
             ex_lines.append(f"Guidance: {exercise.guidance}")
 
-        # Pull recent sets (last 10)
+        # Pull recent sets (last 20)
         recent_sets = await workout_set_repo.get_by_exercise(
-            session, exercise.id, user_id, limit=10
+            session, exercise.id, user_id, limit=20
         )
 
         if recent_sets:
@@ -97,7 +115,7 @@ async def build_coaching_context(
                 for ws in recent_sets:
                     by_batch.setdefault(ws.batch_id, []).append(ws)
 
-                for batch_id, sets in list(by_batch.items())[:5]:
+                for batch_id, sets in list(by_batch.items())[:8]:
                     first = sets[0]
                     date_str = first.set_date.strftime("%b %d")
                     set_count = len(sets)
@@ -130,16 +148,89 @@ async def build_coaching_context(
 
         sections.append("\n".join(ex_lines))
 
-    # 6. Body weight history (last 5 readings)
-    weight_records = await body_weight_repo.get_by_user(session, user_id, limit=5)
-    if weight_records:
-        bw_lines = ["BODY WEIGHT:"]
-        for r in weight_records:
-            date_str = r.recorded_at.strftime("%b %d")
-            line = f"- {date_str}: {r.weight:g} {r.unit}"
-            if r.notes:
-                line += f" ({r.notes})"
-            bw_lines.append(line)
-        sections.append("\n".join(bw_lines))
+    # 8. Body weight history (last 5 readings) with trend
+    weight_section = await _build_body_weight_section(session, user_id)
+    if weight_section:
+        sections.append(weight_section)
 
     return "\n\n".join(sections)
+
+
+async def _build_consistency_section(
+    session: AsyncSession, user_id: int, user_tz: str
+) -> str:
+    """One-block summary of training frequency, streak, and recency."""
+    today = now_in_tz(user_tz).date()
+    dates_90 = await workout_set_repo.get_workout_dates(session, user_id, days=90)
+    if not dates_90:
+        return ""
+
+    dates_30 = [d for d in dates_90 if (today - d).days <= 30]
+    count_7d = len([d for d in dates_90 if (today - d).days <= 7])
+    stats = compute_consistency(dates_90, dates_30, today)
+
+    lines = ["CONSISTENCY:"]
+    lines.append(
+        f"- {count_7d} workouts in last 7 days, {stats['count_30d']} in last 30, "
+        f"{stats['count_90d']} in last 90"
+    )
+    if stats["streak"] > 0:
+        unit = "day" if stats["streak"] == 1 else "days"
+        lines.append(f"- Current streak: {stats['streak']} {unit}")
+    elif stats["days_since_last"] is not None:
+        lines.append(f"- Last workout: {stats['days_since_last']} days ago")
+    if stats["avg_gap"] is not None:
+        lines.append(f"- Avg {stats['avg_gap']:.1f} days between workouts")
+    return "\n".join(lines)
+
+
+async def _build_volume_section(session: AsyncSession, user_id: int) -> str:
+    """Weekly tonnage by muscle group for the last few weeks (trend signal)."""
+    rows = await workout_set_repo.get_weekly_volume(session, user_id, weeks=8)
+    if not rows:
+        return ""
+
+    # Group by yearweek (rows arrive ordered yw desc, vol desc)
+    weeks: OrderedDict[int, list] = OrderedDict()
+    for yw, mg, vol in rows:
+        weeks.setdefault(yw, []).append((mg, vol))
+
+    lines = ["VOLUME (weekly tonnage by muscle group, recent first):"]
+    for yw, groups in list(weeks.items())[:4]:
+        year = yw // 100
+        week = yw % 100
+        group_str = "; ".join(f"{mg} {vol:,.0f}" for mg, vol in groups)
+        lines.append(f"- Wk {year}-{week:02d}: {group_str}")
+    return "\n".join(lines)
+
+
+async def _build_body_weight_section(session: AsyncSession, user_id: int) -> str:
+    """Last few body-weight readings plus an overall trend line."""
+    weight_records = await body_weight_repo.get_by_user(session, user_id, limit=5)
+    if not weight_records:
+        return ""
+
+    lines = ["BODY WEIGHT:"]
+    for r in weight_records:
+        date_str = r.recorded_at.strftime("%b %d")
+        line = f"- {date_str}: {r.weight:g} {r.unit}"
+        if r.notes:
+            line += f" ({r.notes})"
+        lines.append(line)
+
+    # Trend: oldest-to-newest within this window (records are newest-first)
+    if len(weight_records) >= 2:
+        newest = weight_records[0]
+        oldest = weight_records[-1]
+        delta = newest.weight - oldest.weight
+        days = (newest.recorded_at - oldest.recorded_at).days
+        if days > 0 and abs(delta) >= 0.1:
+            per_week = delta / days * 7
+            direction = "down" if delta < 0 else "up"
+            lines.append(
+                f"- Trend: {direction} {abs(delta):g} {newest.unit} over {days} days "
+                f"({per_week:+.1f} {newest.unit}/wk)"
+            )
+        elif days > 0:
+            lines.append(f"- Trend: stable over {days} days")
+    return "\n".join(lines)

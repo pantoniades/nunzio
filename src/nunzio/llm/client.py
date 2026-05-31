@@ -30,6 +30,14 @@ _RESIDENT_MODEL_ALLOWLIST: frozenset[str] = frozenset({
 })
 
 
+def _safe_zone(tz_name: str) -> ZoneInfo:
+    """Resolve an IANA zone name, falling back to America/New_York if invalid."""
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return ZoneInfo("America/New_York")
+
+
 def _instructor_retries(label: str, attempts: int = 3) -> AsyncRetrying:
     """Build a tenacity AsyncRetrying that logs each instructor JSON-parse retry."""
 
@@ -114,12 +122,14 @@ class LLMClient:
         wait=wait_exponential(multiplier=1, min=1, max=10),
         retry=retry_if_exception_type((ConnectionError, TimeoutError)),
     )
-    async def classify_intent(self, message: str) -> UserIntent:
+    async def classify_intent(
+        self, message: str, user_tz: str = "America/New_York"
+    ) -> UserIntent:
         """Classify user intent with confidence scoring."""
         if not self._instructor_client:
             await self.initialize()
 
-        today = datetime.now(ZoneInfo("America/New_York"))
+        today = datetime.now(_safe_zone(user_tz))
         today_str = today.strftime("%A, %B %-d, %Y")
 
         prompt = f"""
@@ -137,6 +147,7 @@ class LLMClient:
         - delete_workout: User wants to undo, delete, or remove a logged workout ("undo", "delete last", "remove session #42", "that's wrong")
         - repeat_last: User wants to log the same workout again ("again", "repeat last", "same as last time", "another set", "one more", "one more set", "same thing")
         - edit_set: User wants to fix, change, or correct a value on an already-logged set ("change reps to 12", "fix weight to 185", "edit last set", "update bench press to 8 reps", "correct #42 set 3 to 200 lbs")
+        - set_timezone: User wants to set or change their timezone ("set my timezone to London", "I'm in Tokyo now", "switch to Pacific time", "I'm traveling to Berlin", "change timezone to America/Denver"). When this intent applies, also set mentioned_timezone to the IANA zone name (e.g. "Asia/Tokyo", "Europe/London", "America/Los_Angeles").
         - coaching: User wants advice, recommendations, questions about training, or anything else
 
         For view_stats intent, also classify the stats_type:
@@ -222,12 +233,14 @@ class LLMClient:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
     )
-    async def extract_workout_data(self, message: str) -> WorkoutData | None:
+    async def extract_workout_data(
+        self, message: str, user_tz: str = "America/New_York"
+    ) -> WorkoutData | None:
         """Extract structured workout data from user message."""
         if not self._instructor_client:
             await self.initialize()
 
-        today = datetime.now(ZoneInfo("America/New_York"))
+        today = datetime.now(_safe_zone(user_tz))
         today_str = today.strftime("%A, %B %-d, %Y")
 
         prompt = f"""
@@ -306,12 +319,14 @@ class LLMClient:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
     )
-    async def extract_body_weight_data(self, message: str) -> BodyWeightData | None:
+    async def extract_body_weight_data(
+        self, message: str, user_tz: str = "America/New_York"
+    ) -> BodyWeightData | None:
         """Extract body weight data from user message."""
         if not self._instructor_client:
             await self.initialize()
 
-        today = datetime.now(ZoneInfo("America/New_York"))
+        today = datetime.now(_safe_zone(user_tz))
         today_str = today.strftime("%A, %B %-d, %Y")
 
         prompt = f"""
@@ -391,20 +406,29 @@ class LLMClient:
             await self.initialize()
 
         system_prompt = (
-            "You are Nunzio, a direct workout coach. Give specific, actionable advice "
-            "with exact sets, reps, and weights.\n\n"
-            "RULES:\n"
-            "- When the user's history is provided, base your advice on their actual numbers\n"
-            "- Prescribe specific weights: \"3x10 @ 35/40/40 lbs\" not \"moderate weight\"\n"
-            "- Progressive overload: if all target reps were hit last time, suggest +5 lbs "
-            "for barbell compounds, +5 lbs (per hand) for dumbbells, +2.5 lbs for isolation\n"
-            "- If they missed reps or stalled, suggest same weight or a deload\n"
-            "- For cardio: progress by adding duration or intervals, not weight. Reference "
-            "their recent times/distances. Suggest specific session plans (\"30 min steady "
-            "state at conversational pace\" or \"8x30s sprints with 90s rest\")\n"
-            "- Keep responses concise — a prescription and brief rationale, not an essay\n"
-            "- If there's not enough history, say so and give a conservative starting point\n"
-            "- Reference the exercise guidance and training principles provided in context"
+            "You are Nunzio, a sharp, no-nonsense strength coach. You write a specific "
+            "prescription grounded in the athlete's own data — never generic advice.\n\n"
+            "The context block may contain: TRAINING PRINCIPLES, CONSISTENCY (frequency, "
+            "streak, recency), VOLUME (weekly tonnage by muscle group), per-exercise "
+            "history with PRs, and BODY WEIGHT trend. Use whatever is present.\n\n"
+            "HOW TO RESPOND:\n"
+            "- Lead with the prescription: exact sets x reps x weight, e.g. "
+            "\"3x8 @ 190 lbs (up from 185)\". Cite the actual last-session numbers you're "
+            "building on. Never say \"moderate weight\" or \"a challenging load\".\n"
+            "- Progressive overload from their LAST session: if they hit all target reps, "
+            "add +5 lbs for barbell compounds, +5 lbs/hand for dumbbells, +2.5 lbs for "
+            "isolation. If they missed reps or stalled 2+ sessions, hold the weight or deload ~10%.\n"
+            "- Use the signals: if CONSISTENCY shows a long gap or broken streak, account "
+            "for detraining (ease back in). If VOLUME for the target muscle group is flat or "
+            "falling, say so and prescribe the increase. If BODY WEIGHT is trending against "
+            "their goal, mention it briefly.\n"
+            "- For cardio: progress duration or intervals, not weight. Reference recent "
+            "times/distances and give a concrete session "
+            "(\"30 min steady at conversational pace\" or \"8x30s sprints, 90s rest\").\n"
+            "- Be concise: prescription first, then 1-2 sentences of why. No essays, no "
+            "preamble, no restating their whole history back to them.\n"
+            "- If the history is genuinely too thin to prescribe from, say so in one line "
+            "and give a conservative, specific starting point — still with real numbers."
         )
 
         user_content = message
@@ -419,7 +443,7 @@ class LLMClient:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
                 ],
-                temperature=0.7,
+                temperature=0.4,
             )
             return response.choices[0].message.content.strip()
         except Exception as e:

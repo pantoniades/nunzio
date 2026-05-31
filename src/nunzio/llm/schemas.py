@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 class UserIntent(BaseModel):
     """User intent classification with exercise/muscle group extraction."""
-    intent: Literal["log_workout", "view_stats", "list_workouts", "coaching", "delete_workout", "repeat_last", "log_weight", "edit_set"] = Field(
+    intent: Literal["log_workout", "view_stats", "list_workouts", "coaching", "delete_workout", "repeat_last", "log_weight", "edit_set", "set_timezone"] = Field(
         description="Primary user intention"
     )
     confidence: float = Field(
@@ -35,6 +35,15 @@ class UserIntent(BaseModel):
     mentioned_muscle_groups: List[str] = Field(
         default_factory=list,
         description="Muscle groups mentioned in the message",
+    )
+    mentioned_timezone: Optional[str] = Field(
+        default=None,
+        description=(
+            "For set_timezone intent: the IANA timezone name the user wants. "
+            "Map place names or abbreviations to IANA zones (e.g. 'Tokyo' -> "
+            "'Asia/Tokyo', 'London' -> 'Europe/London', 'PST'/'Pacific' -> "
+            "'America/Los_Angeles', 'eastern' -> 'America/New_York'). Null otherwise."
+        ),
     )
 
 

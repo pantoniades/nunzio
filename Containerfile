@@ -6,13 +6,15 @@ FROM python:3.13-slim AS builder
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    UV_NO_CACHE=1 \
+    UV_LINK_MODE=copy
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+# Use uv instead of pip to install dependencies. On this host's network a
+# middlebox truncates HTTPS responses whose User-Agent identifies as "requests"
+# (which pip's vendored HTTP stack uses), corrupting PyPI index pages and
+# breaking `pip install`. uv ships its own HTTP client and is unaffected. It
+# also installs from prebuilt wheels, so no compiler toolchain is needed.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -21,8 +23,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src/ ./src/
 
-RUN pip install --upgrade pip && \
-    pip install .
+RUN uv pip install --python /opt/venv/bin/python .
 
 # Production stage
 FROM python:3.13-slim
@@ -44,25 +45,7 @@ RUN mkdir -p /app/logs /app/data && \
 USER nunzio
 
 # Health check script
-COPY --chown=nunzio:nunzio <<'EOF' /app/healthcheck.py
-#!/usr/bin/env python3
-"""Health check script for Nunzio application."""
-import asyncio
-import sys
-from nunzio.database.connection import db_manager
-
-async def check_health():
-    try:
-        await db_manager.initialize()
-        is_healthy = await db_manager.health_check()
-        await db_manager.close()
-        return 0 if is_healthy else 1
-    except Exception:
-        return 1
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(check_health()))
-EOF
+COPY --chown=nunzio:nunzio healthcheck.py /app/healthcheck.py
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python /app/healthcheck.py

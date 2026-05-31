@@ -1,0 +1,30 @@
+# Nunzio - Local Workout Assistant (Telegram bot) - Podman Quadlet
+# Place in: ~/.config/containers/systemd/nunzio.container
+# No published ports — the bot reaches Telegram via outbound long-polling.
+#
+# Build the image first:  podman build --format docker -t localhost/nunzio:latest .
+# See deploy/README.md for full setup (image build, migration, linger).
+
+[Unit]
+Description=Nunzio workout assistant (Telegram bot)
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=localhost/nunzio:latest
+# Share the host network namespace so the .env hostnames (odysseus:3306,
+# odysseus:11500) resolve exactly as they do on the host — MySQL and the LLM
+# both run on this box.
+Network=host
+# Secrets + config (DB URL, LLM URL/model, Telegram token, allowed user IDs).
+EnvironmentFile=/home/philip/Deploy/nunzio/.env
+
+# Automatically restart the service when the local image is rebuilt.
+AutoUpdate=local
+
+[Service]
+Restart=always
+TimeoutStopSec=70
+
+[Install]
+WantedBy=default.target
