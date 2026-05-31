@@ -59,7 +59,8 @@ This context block is injected into the user message alongside a coaching system
 - **LLM**: OpenAI-compatible API (currently llama-swap on `odysseus:11500`), model `qwen3.5-27b` (configurable via .env)
 - **DB**: MySQL on `odysseus:3306`, database `nunzio_workouts`
 - **Structured extraction**: Instructor library (JSON mode) wrapping OpenAI client for Pydantic model output
-- **Container**: Podman via multi-stage Containerfile, runs `nunzio-bot` by default. Config via `--env-file`.
+- **Container**: Podman via multi-stage Containerfile (built with `uv`, not pip), runs `nunzio-bot` by default. Config via `--env-file`.
+- **Deployment**: runs full-time on odysseus as a rootless Podman Quadlet systemd service (`nunzio.service`), monitored by `~/admin/health-check.sh`. Two clones: `~/Projects/nunzio` (dev) and `~/Deploy/nunzio` (build/run, holds the live `.env`). Redeploy + host-specific gotchas (uv, `--format docker`, migrations) documented in [`deploy/README.md`](deploy/README.md).
 
 ## Schema (v0.5 — flat model)
 

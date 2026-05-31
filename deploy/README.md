@@ -68,14 +68,57 @@ podman ps                           # health column shows the image healthcheck
 systemctl --user restart nunzio     # restart
 ```
 
-## Updating to a new version
+## Redeploying after continued development
+
+There are two clones of this repo on odysseus, both on `master`:
+
+- **`~/Projects/nunzio`** — where development happens.
+- **`~/Deploy/nunzio`** — the deployment checkout. Holds the live `.env` (which
+  the Quadlet unit reads) and is where the image is built from.
+
+Both track the same GitHub remote, so the flow is: commit in Projects → push →
+pull in Deploy → rebuild → restart.
 
 ```bash
-git pull
+# 1. In the dev clone: commit your work and push.
+cd ~/Projects/nunzio
+git add -A && git commit -m "..."
+git push origin master
+
+# 2. In the deploy clone: pull the new code.
+cd ~/Deploy/nunzio
+git pull --ff-only
+
+# 3. Rebuild the image (--format docker is required for HEALTHCHECK).
 podman build --format docker -t localhost/nunzio:latest .
-python scripts/migrate_v07.py       # only if a new migration was added
+
+# 4. Run any new DB migration (see "migrations" note below).
+venv/bin/python scripts/migrate_v0X.py    # only if a migration was added
+
+# 5. Restart the service onto the new image.
 systemctl --user restart nunzio
+systemctl --user status nunzio            # confirm active + healthy
+journalctl --user -u nunzio -n 30         # confirm "Application started"
 ```
+
+### Gotchas specific to this host
+
+- **Use `uv`, not `pip`.** A middlebox on this network truncates HTTPS responses
+  whose User-Agent is `requests`, which corrupts PyPI index pages and breaks
+  `pip install` (and any `podman build` that shells out to pip). The Containerfile
+  already installs deps with `uv`, so `podman build` works. For the host venvs
+  (used to run migrations/tests), install with uv too:
+  `uv pip install -e ".[dev]"` — `pip install` will fail. Install uv once with
+  `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+- **`--format docker`** on every build — podman's default OCI format silently
+  drops the `HEALTHCHECK`.
+- **Migrations run from a host venv, not the container.** `scripts/` is not copied
+  into the image, so run migrations from `~/Deploy/nunzio` with its venv
+  (which needs `cryptography` for MySQL 8 auth — it's a project dependency, so a
+  fresh `uv pip install -e .` covers it). Migrations are idempotent and
+  non-destructive; safe to re-run.
+- **One Telegram poller at a time** — don't run the bot by hand (CLI/tmux) while
+  the service is up; the second `getUpdates` gets a 409.
 
 ## Notes
 
