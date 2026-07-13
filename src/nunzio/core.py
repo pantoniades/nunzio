@@ -22,6 +22,48 @@ from .stats import compute_consistency
 
 logger = logging.getLogger(__name__)
 
+# Reps/weight inversion guard: the extractor occasionally flips unitless "AxB"
+# shorthand (e.g. "8x30" → reps=30, weight=8). A strength set with this many reps
+# and a weight this low is almost certainly backwards.
+_SWAP_REPS_MIN = 30
+_SWAP_WEIGHT_MAX = 15.0
+
+# Plausible human body-weight ranges per unit — used to reject obvious mislogs
+# (e.g. "20 lb" routed to log_weight). Override phrases below bypass the guard.
+_PLAUSIBLE_BODY_WEIGHT = {"lbs": (50.0, 700.0), "kg": (25.0, 320.0)}
+_BODY_WEIGHT_OVERRIDE = ("body weight", "bodyweight", "i weigh", "my weight")
+
+_LBS_PER_KG = 2.20462
+
+# Map loose category words to the canonical muscle_group values seeded in the DB,
+# so "what aerobic have I done" resolves to the cardio group instead of dead-ending.
+_GROUP_SYNONYMS = {
+    "aerobic": "cardio", "cardio": "cardio", "conditioning": "cardio",
+    "chest": "chest", "back": "back",
+    "shoulders": "shoulders", "shoulder": "shoulders",
+    "biceps": "biceps", "bicep": "biceps", "triceps": "triceps", "tricep": "triceps",
+    "legs": "legs", "leg": "legs",
+    "core": "core", "abs": "core", "ab": "core",
+    "flexibility": "flexibility", "stretching": "flexibility", "mobility": "flexibility",
+}
+
+
+def _convert_weight(value: float, from_unit: str, to_unit: str) -> float:
+    """Convert a weight between lbs and kg. Unknown units pass through unchanged."""
+    if from_unit == to_unit:
+        return value
+    if from_unit == "kg" and to_unit == "lbs":
+        return value * _LBS_PER_KG
+    if from_unit == "lbs" and to_unit == "kg":
+        return value / _LBS_PER_KG
+    return value
+
+
+def _is_plausible_body_weight(weight: float, unit: str) -> bool:
+    """Whether a value is a believable human body weight for the given unit."""
+    lo, hi = _PLAUSIBLE_BODY_WEIGHT.get(unit, (50.0, 700.0))
+    return lo <= weight <= hi
+
 
 class MessageHandler:
     """Routes natural language through LLM extraction to DB persistence."""
@@ -29,6 +71,9 @@ class MessageHandler:
     def __init__(self, verbose: bool = True) -> None:
         self._llm = LLMClient()
         self._verbose = verbose
+        # Per-user page index for "more" pagination of the stats overview. In-memory
+        # only (single-process bot) — reset on restart, which is fine for a UX nicety.
+        self._stats_pages: dict[int, int] = {}
 
     async def initialize(self) -> None:
         await db_manager.initialize()
@@ -62,7 +107,7 @@ class MessageHandler:
         elif intent.intent == "set_timezone":
             response = await self._handle_set_timezone(intent, user_id)
         elif intent.intent == "view_stats":
-            response = await self._handle_view_stats(intent, user_id, user_tz)
+            response = await self._handle_view_stats(intent, user_id, user_tz, message)
         elif intent.intent == "list_workouts":
             response = await self._handle_list_workouts(user_id)
         elif intent.intent == "edit_set":
@@ -79,6 +124,10 @@ class MessageHandler:
 
         # Fire-and-forget message logging — failure must not block the response
         try:
+            extracted_data = intent.model_dump_json(exclude_none=True)
+        except Exception:
+            extracted_data = None
+        try:
             async with db_manager.get_session() as session:
                 await message_log_repo.create(
                     session,
@@ -87,7 +136,7 @@ class MessageHandler:
                         "raw_message": message,
                         "classified_intent": intent.intent,
                         "confidence": intent.confidence,
-                        "extracted_data": None,
+                        "extracted_data": extracted_data,
                         "response_summary": response[:200] if response else None,
                     },
                 )
@@ -95,6 +144,20 @@ class MessageHandler:
             logger.warning("Message logging failed", exc_info=True)
 
         return response
+
+    @staticmethod
+    def _swap_if_inverted(ex_set) -> bool:
+        """Fix reps/weight when unitless 'AxB' shorthand was extracted backwards.
+
+        Mutates ex_set in place and returns True if a swap happened. Conservative:
+        only strength sets with many reps and an implausibly light weight qualify.
+        """
+        if ex_set.duration_minutes or ex_set.weight is None or ex_set.reps is None:
+            return False
+        if ex_set.reps >= _SWAP_REPS_MIN and 0 < ex_set.weight < _SWAP_WEIGHT_MAX:
+            ex_set.reps, ex_set.weight = int(ex_set.weight), float(ex_set.reps)
+            return True
+        return False
 
     @staticmethod
     def _expand_sets(exercises: list) -> list:
@@ -137,6 +200,14 @@ class MessageHandler:
             if not ex_set.reps:
                 ex_set.reps = 10
                 defaulted_reps.add(i)
+
+        # Guard against reps/weight inversion on unitless "AxB" shorthand. Only touch
+        # strength sets whose numbers are clearly backwards (many reps, tiny weight);
+        # note it in the response so the user can correct if we guessed wrong.
+        swapped = False
+        for ex_set in workout_data.exercises:
+            if self._swap_if_inverted(ex_set):
+                swapped = True
 
         async with db_manager.get_session() as session:
             batch_id = await workout_set_repo.get_next_batch_id(session, user_id)
@@ -215,8 +286,12 @@ class MessageHandler:
                 logged_set_data.append({
                     "exercise_id": exercise.id,
                     "name": exercise.name,
+                    "set_number": ex_set.set_number,
                     "weight": ex_set.weight,
                     "reps": ex_set.reps,
+                    "unit": unit,
+                    "duration_minutes": ex_set.duration_minutes,
+                    "distance": ex_set.distance,
                     "notes": ex_set.notes,
                     "is_cardio": bool(ex_set.duration_minutes),
                 })
@@ -227,7 +302,14 @@ class MessageHandler:
                 session, exercise_ids, user_id, exclude_batch=batch_id
             )
 
+        # Heuristic decides whether anything noteworthy happened. If so, upgrade to an
+        # LLM-written, data-grounded one-liner; fall back to the heuristic on any failure.
         comment = self._generate_log_comment(logged_set_data, history, now)
+        if comment:
+            summary = self._log_comment_summary(logged_set_data, history, comment)
+            llm_comment = await self._llm.generate_log_comment(summary)
+            if llm_comment:
+                comment = llm_comment
 
         if workout_data.date and workout_data.date != now_in_tz(user_tz).date():
             date_label = workout_data.date.strftime("%b %-d")
@@ -244,6 +326,8 @@ class MessageHandler:
         for unit, vol in volume_by_unit.items():
             if vol > 0:
                 lines.append(f"  Total volume: {vol:.0f} {unit}")
+        if swapped:
+            lines.append("(read your “reps×weight” as reps first, weight second — say 'edit' if I flipped it)")
         if comment:
             lines.append(comment)
         return "\n".join(lines)
@@ -334,6 +418,77 @@ class MessageHandler:
         return None
 
     @staticmethod
+    def _log_comment_summary(
+        logged_sets: list[dict], history: list, heuristic: str
+    ) -> str:
+        """Compact, factual context block for the LLM log-comment call.
+
+        Gives the model just-logged numbers, prior history per exercise (last session
+        + all-time best), and the heuristic signal — enough to write one grounded line.
+        """
+        hist_by_ex: dict[int, list] = {}
+        for ws in history:
+            hist_by_ex.setdefault(ws.exercise_id, []).append(ws)
+
+        # Unique exercises in log order
+        seen: set[int] = set()
+        order: list[dict] = []
+        for s in logged_sets:
+            if s["exercise_id"] not in seen:
+                seen.add(s["exercise_id"])
+                order.append(s)
+
+        lines = ["JUST LOGGED:"]
+        for ex in order:
+            ex_sets = [s for s in logged_sets if s["exercise_id"] == ex["exercise_id"]]
+            if ex["is_cardio"]:
+                dur = ex.get("duration_minutes")
+                dist = ex.get("distance")
+                parts = []
+                if dur:
+                    parts.append(f"{dur} min")
+                if dist:
+                    parts.append(f"{dist:g} mi")
+                lines.append(f"- {ex['name']}: {', '.join(parts) or 'cardio'}")
+            else:
+                weights = [s["weight"] for s in ex_sets if s["weight"]]
+                top = max(weights) if weights else None
+                top_reps = next(
+                    (s["reps"] for s in ex_sets if s["weight"] == top), ex_sets[0]["reps"]
+                )
+                unit = ex.get("unit", "lbs")
+                if top is not None:
+                    lines.append(
+                        f"- {ex['name']}: {len(ex_sets)} set(s), top {top_reps}x{top:g} {unit}"
+                    )
+                else:
+                    lines.append(f"- {ex['name']}: {len(ex_sets)} set(s), bodyweight")
+
+        prior_lines: list[str] = []
+        for ex in order:
+            ex_hist = hist_by_ex.get(ex["exercise_id"], [])
+            if not ex_hist:
+                continue
+            last = ex_hist[0]  # newest first
+            last_date = last.set_date.strftime("%b %-d")
+            weighted = [h for h in ex_hist if h.weight is not None]
+            best = max((h.weight for h in weighted), default=None)
+            if last.weight is not None:
+                last_str = f"{last.reps or 0}x{last.weight:g} {last.weight_unit}"
+            elif last.duration_minutes:
+                last_str = f"{last.duration_minutes} min"
+            else:
+                last_str = f"{last.reps or 0} reps"
+            best_str = f"; best {best:g}" if best is not None else ""
+            prior_lines.append(f"- {ex['name']}: last {last_str} on {last_date}{best_str}")
+        if prior_lines:
+            lines.append("PRIOR HISTORY:")
+            lines.extend(prior_lines)
+
+        lines.append(f"SIGNAL: {heuristic}")
+        return "\n".join(lines)
+
+    @staticmethod
     def _parse_workout_id(message: str) -> int | None:
         """Extract a workout ID from a message like 'delete #42' or 'delete 42'."""
         match = re.search(r"#?(\d+)", message)
@@ -370,6 +525,23 @@ class MessageHandler:
             ex_str = ", ".join(exercises) if exercises else "no exercises"
             return f"Deleted workout #{batch_id} ({date_str}): {ex_str} — {len(deleted)} sets removed."
 
+    @staticmethod
+    def _describe_edit_target(target_sets: list) -> str:
+        """Short description of the set(s) an edit would touch, for echo prompts."""
+        first = target_sets[0]
+        name = first.exercise.name if first.exercise else f"exercise #{first.exercise_id}"
+        if first.duration_minutes:
+            detail = f" {first.duration_minutes} min"
+        elif first.weight is not None:
+            detail = f" {first.reps or 0}×{first.weight:g}"
+        elif first.reps is not None:
+            detail = f" {first.reps} reps"
+        else:
+            detail = ""
+        n = len(target_sets)
+        extra = f" (+{n - 1} more)" if n > 1 else ""
+        return f"{name}{detail} in #{first.batch_id}{extra}"
+
     async def _handle_edit_set(self, message: str, user_id: int) -> str:
         """Edit one or more sets — by batch_id, exercise name, or 'last'."""
         data = await self._llm.extract_edit_set_data(message)
@@ -390,9 +562,6 @@ class MessageHandler:
             val = getattr(data, src)
             if val is not None:
                 updates[dst] = val
-
-        if not updates:
-            return "I couldn't figure out what to change. Specify new reps, weight, or notes."
 
         async with db_manager.get_session() as session:
             # Resolve target sets
@@ -425,6 +594,14 @@ class MessageHandler:
                 target_sets = await workout_set_repo.get_latest_batch_for_user(session, user_id)
                 if not target_sets:
                     return "Nothing to edit — no workouts found."
+
+            # No value given (e.g. a bare "edit") — echo the target we'd change and
+            # ask for the new value instead of dead-ending.
+            if not updates:
+                return (
+                    f"Editing {self._describe_edit_target(target_sets)} — what should I change? "
+                    f"Say e.g. 'reps to 12', 'weight to 185', or 'notes to felt easy'."
+                )
 
             # Capture before state and apply updates
             batch_id = target_sets[0].batch_id
@@ -594,10 +771,24 @@ class MessageHandler:
             return f"{w_str} {unit}"
         return w_str
 
+    @staticmethod
+    def _is_more_request(message: str) -> bool:
+        """True for a bare 'more'/'next'/'older' follow-up (stats pagination)."""
+        return bool(
+            re.fullmatch(
+                r"(more|next|older|show more|more stats|keep going|go on)[.!]*",
+                message.strip(),
+                re.IGNORECASE,
+            )
+        )
+
     async def _handle_view_stats(
-        self, intent, user_id: int, user_tz: str = "America/New_York"
+        self, intent, user_id: int, user_tz: str = "America/New_York", message: str = ""
     ) -> str:
         stats_type = getattr(intent, "stats_type", None) or "overview"
+        # Non-overview views aren't paginated — clear any stale page cursor.
+        if stats_type in ("prs", "exercise_history", "volume", "consistency", "weight"):
+            self._stats_pages.pop(user_id, None)
         if stats_type == "prs":
             return await self._handle_prs(user_id)
         elif stats_type == "exercise_history":
@@ -609,20 +800,22 @@ class MessageHandler:
         elif stats_type == "weight":
             return await self._handle_weight_trend(user_id)
         else:
-            return await self._handle_overview(user_id, intent, user_tz)
+            page = self._stats_pages.get(user_id, 0) + 1 if self._is_more_request(message) else 0
+            return await self._handle_overview(user_id, intent, user_tz, page=page)
 
     async def _handle_overview(
-        self, user_id: int, intent=None, user_tz: str = "America/New_York"
+        self, user_id: int, intent=None, user_tz: str = "America/New_York", *, page: int = 0
     ) -> str:
         """Stats overview with optional date filtering.
 
         - last_session: all sets from the most recent workout day before today
         - stats_date set: filter to that date (or date range if stats_end_date set)
-        - otherwise: last 3 days of workouts
+        - otherwise: 3 days of workouts per page ('more' pages further back)
         """
         stats_type = getattr(intent, "stats_type", None)
         stats_date = getattr(intent, "stats_date", None)
         stats_end_date = getattr(intent, "stats_end_date", None)
+        default_view = not stats_date and stats_type != "last_session"
 
         async with db_manager.get_session() as session:
             if stats_type == "last_session":
@@ -653,7 +846,8 @@ class MessageHandler:
                     session, user_id, start, end
                 )
             else:
-                all_sets = await workout_set_repo.get_latest_batches(session, user_id, limit=20)
+                # Fetch a wider window so 'more' can page further back.
+                all_sets = await workout_set_repo.get_latest_batches(session, user_id, limit=90)
 
             if not all_sets:
                 if stats_type == "last_session":
@@ -667,14 +861,23 @@ class MessageHandler:
 
             # Group sets by date
             days: OrderedDict[str, list] = OrderedDict()
-            for ws in (reversed(all_sets) if not stats_date and stats_type != "last_session" else all_sets):
+            for ws in (reversed(all_sets) if default_view else all_sets):
                 date_key = ws.set_date.strftime("%a %b %-d")
                 days.setdefault(date_key, []).append(ws)
 
-            # Only trim to 3 days for the default (no filter) case
-            if not stats_date and stats_type != "last_session":
-                while len(days) > 3:
-                    days.popitem(last=False)
+            # Default view: page through day-groups, 3 days at a time, most recent first.
+            has_more = False
+            if default_view:
+                per_page = 3
+                newest_first = list(reversed(days.items()))  # most recent day first
+                start_i = page * per_page
+                page_items = newest_first[start_i:start_i + per_page]
+                if not page_items:
+                    return "That's as far back as I've got — say 'stats' to start over."
+                has_more = len(newest_first) > start_i + per_page
+                self._stats_pages[user_id] = page
+                # Restore oldest→newest order within the page for display.
+                days = OrderedDict(reversed(page_items))
 
             lines: list[str] = []
             for i, (date_key, day_sets) in enumerate(days.items()):
@@ -719,6 +922,9 @@ class MessageHandler:
                                 set_strs.append(f"{r} reps")
                         lines.append(f"  {name} \u2014 {' / '.join(set_strs)}")
 
+            if has_more:
+                lines.append("")
+                lines.append("(say 'more' for older workouts)")
             return "\n".join(lines)
 
     async def _handle_prs(self, user_id: int) -> str:
@@ -754,7 +960,12 @@ class MessageHandler:
                     break
 
             if not exercise:
-                return "Which exercise? Try something like 'bench press history'."
+                # Category fallback: "what aerobic have I done" names a group, not a
+                # single exercise — summarize sessions across that muscle group.
+                group = self._resolve_muscle_group(intent)
+                if group:
+                    return await self._handle_category_history(session, group, user_id)
+                return "Which exercise? Try 'bench press history' — or a group like 'cardio'."
 
             sets = await workout_set_repo.get_by_exercise(
                 session, exercise.id, user_id, limit=50
@@ -796,6 +1007,62 @@ class MessageHandler:
                         lines.append(f"  {date_str}: {' / '.join(set_strs)}")
 
             return "\n".join(lines)
+
+    @staticmethod
+    def _resolve_muscle_group(intent) -> str | None:
+        """Map any mentioned group/exercise word to a canonical muscle_group, or None."""
+        candidates = list(getattr(intent, "mentioned_muscle_groups", []))
+        for name in getattr(intent, "mentioned_exercises", []):
+            candidates.extend(name.split())
+        for cand in candidates:
+            group = _GROUP_SYNONYMS.get(cand.strip().lower())
+            if group:
+                return group
+        return None
+
+    async def _handle_category_history(self, session, group: str, user_id: int) -> str:
+        """Summarize recent sessions across all exercises in a muscle group."""
+        exercises = await exercise_repo.get_by_muscle_group(session, group)
+        if not exercises:
+            return f"No exercises catalogued for {group}."
+
+        # Gather recent sets across the group, then group by session (batch_id).
+        all_sets: list = []
+        for ex in exercises:
+            all_sets.extend(
+                await workout_set_repo.get_by_exercise(session, ex.id, user_id, limit=20)
+            )
+        if not all_sets:
+            return f"No {group} sessions logged yet."
+
+        all_sets.sort(key=lambda s: s.set_date, reverse=True)
+        batches: OrderedDict[int, list] = OrderedDict()
+        for s in all_sets:
+            batches.setdefault(s.batch_id, []).append(s)
+
+        lines: list[str] = [f"{group.capitalize()} — recent sessions:"]
+        for batch_sets in list(batches.values())[:12]:
+            first = batch_sets[0]
+            date_str = first.set_date.strftime("%b %-d")
+            # One entry per exercise within the session.
+            seen: set[int] = set()
+            for s in batch_sets:
+                if s.exercise_id in seen:
+                    continue
+                seen.add(s.exercise_id)
+                name = s.exercise.name if s.exercise else f"exercise #{s.exercise_id}"
+                if s.duration_minutes:
+                    parts = [f"{s.duration_minutes} min"]
+                    if s.distance:
+                        parts.append(f"{s.distance:g} mi")
+                    detail = ", ".join(parts)
+                elif s.weight is not None:
+                    detail = f"{s.reps or 0}x{self._fmt_weight(s.weight, s.weight_unit)}"
+                else:
+                    detail = f"{s.reps or 0} reps"
+                lines.append(f"  {date_str} — {name}: {detail}")
+
+        return "\n".join(lines)
 
     async def _handle_volume_trends(self, user_id: int) -> str:
         """Show weekly volume by muscle group for the last 8 weeks."""
@@ -885,6 +1152,16 @@ class MessageHandler:
         if not data:
             return "I couldn't extract a weight reading. Try something like: 'weighed 185 lbs'"
 
+        # Plausibility guard: reject obvious mislogs (e.g. "20 lb" that was really a set
+        # weight) unless the user explicitly framed it as a body weight.
+        override = any(p in message.lower() for p in _BODY_WEIGHT_OVERRIDE)
+        if not _is_plausible_body_weight(data.weight, data.unit) and not override:
+            return (
+                f"{data.weight:g} {data.unit} looks off for a body weight, so I didn't save it. "
+                f"If you meant a set, name the exercise (e.g. 'curls 10x20'); "
+                f"if that really is your body weight, say 'body weight {data.weight:g} {data.unit}'."
+            )
+
         if data.date:
             recorded_at = datetime.combine(data.date, now_in_tz(user_tz).time())
         else:
@@ -915,7 +1192,10 @@ class MessageHandler:
             parts[0] = parts[0].rstrip(".") + f" for {date_label}."
 
         if previous:
-            delta = data.weight - previous.weight
+            # Reconcile units before diffing \u2014 a prior kg reading vs a new lbs one
+            # would otherwise produce a nonsense delta.
+            prev_weight = _convert_weight(previous.weight, previous.unit, data.unit)
+            delta = data.weight - prev_weight
             if abs(delta) >= 0.1:
                 arrow = "\u2193" if delta < 0 else "\u2191"
                 prev_date = previous.recorded_at.strftime("%b %-d")

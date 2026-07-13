@@ -57,6 +57,7 @@ class LLMClient:
     def __init__(self) -> None:
         self._client: Optional[AsyncOpenAI] = None
         self._instructor_client: Optional[instructor.AsyncInstructor] = None
+        self._instructor_tools_client: Optional[instructor.AsyncInstructor] = None
         self.model_override: str | None = None
         self._last_logged_model: str | None = None
 
@@ -66,8 +67,16 @@ class LLMClient:
             base_url=f"{config.llm.base_url}/v1",
             api_key="not-needed",
         )
+        # Default extractions use JSON mode (some models emit multiple tool calls
+        # for multi-set workouts, which Instructor's TOOLS mode can't reassemble).
         self._instructor_client = instructor.from_openai(
             self._client, mode=instructor.Mode.JSON
+        )
+        # TOOLS mode for single-object extractions where JSON mode is unreliable:
+        # gemma-4-27b returns an all-null object for the all-optional EditSetData
+        # schema under JSON mode, but extracts it correctly under TOOLS.
+        self._instructor_tools_client = instructor.from_openai(
+            self._client, mode=instructor.Mode.TOOLS
         )
 
     @staticmethod
@@ -284,6 +293,13 @@ class LLMClient:
           "bench press at 100 lb shoulder sore" → exercise_name="Bench Press", notes="shoulder sore"
           "purple band chest pull" → exercise_name="Chest Pull", notes="purple band"
           "incline press felt easy" → exercise_name="Incline Press", notes="felt easy"
+        - REPS×WEIGHT SHORTHAND ("AxB"): for a WEIGHTED exercise, "AxB" with no unit means
+          A reps at B pounds — the FIRST number is reps, the SECOND is weight. Never swap them.
+          Examples:
+          "dumbbell curls 8x30" → reps=8, weight=30 (8 reps at 30 lbs, NOT 30 reps at 8 lbs)
+          "lat pulldown 10x40" → reps=10, weight=40
+          "bench 5x225" → reps=5, weight=225
+          A unit attached to the second number is respected ("10x55 kg" → reps=10, weight=55, unit=kg).
         - BARE NUMBERS: When a single number follows an exercise name with no "reps", "sets",
           or "x" notation (e.g. "face pull 30", "bench 185"), use exercise context to decide:
           for exercises typically done with external weight (cable, barbell, dumbbell, machine),
@@ -362,8 +378,13 @@ class LLMClient:
         wait=wait_exponential(multiplier=1, min=1, max=10),
     )
     async def extract_edit_set_data(self, message: str) -> EditSetData | None:
-        """Extract edit-set instructions from user message."""
-        if not self._instructor_client:
+        """Extract edit-set instructions from user message.
+
+        Uses TOOLS mode (not JSON): the all-optional EditSetData schema causes
+        gemma-4-27b to return an all-null object under JSON mode. TOOLS mode
+        extracts it correctly for both gemma and qwen.
+        """
+        if not self._instructor_tools_client:
             await self.initialize()
 
         prompt = f"""
@@ -388,7 +409,7 @@ class LLMClient:
 
         try:
             model = await self._get_active_model()
-            result = await self._instructor_client.chat.completions.create(
+            result = await self._instructor_tools_client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 response_model=EditSetData,
@@ -420,8 +441,9 @@ class LLMClient:
             "isolation. If they missed reps or stalled 2+ sessions, hold the weight or deload ~10%.\n"
             "- Use the signals: if CONSISTENCY shows a long gap or broken streak, account "
             "for detraining (ease back in). If VOLUME for the target muscle group is flat or "
-            "falling, say so and prescribe the increase. If BODY WEIGHT is trending against "
-            "their goal, mention it briefly.\n"
+            "falling, say so and prescribe the increase. If a LAGGING MUSCLE GROUPS block is "
+            "present, name the stalest/lowest-volume group and steer today's work toward it. "
+            "If BODY WEIGHT shows a clear trend, mention it briefly.\n"
             "- For cardio: progress duration or intervals, not weight. Reference recent "
             "times/distances and give a concrete session "
             "(\"30 min steady at conversational pace\" or \"8x30s sprints, 90s rest\").\n"
@@ -449,6 +471,43 @@ class LLMClient:
         except Exception as e:
             logger.error("Coaching response generation failed", exc_info=True)
             return f"Sorry, I couldn't generate a response right now. ({e})"
+
+    async def generate_log_comment(self, summary: str) -> str | None:
+        """One-line, data-grounded remark after a notable workout log.
+
+        `summary` is a compact factual block (just-logged numbers + prior history +
+        the heuristic signal). Returns a single line, or None on any failure so the
+        caller can fall back to the heuristic string.
+        """
+        if not self._client:
+            await self.initialize()
+
+        system_prompt = (
+            "You are Nunzio, a sharp strength coach reacting to a workout the athlete "
+            "just logged. Write ONE short line (max ~20 words), grounded in the numbers "
+            "provided — cite the actual weight/reps or the streak. Celebrate a real PR, "
+            "flag a stall, or welcome them back after a gap, matching the SIGNAL. Punchy, "
+            "specific, no preamble, no lists, at most one emoji. One sharp remark only."
+        )
+
+        try:
+            model = await self._get_active_model()
+            response = await self._client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": summary},
+                ],
+                temperature=0.6,
+                max_tokens=60,
+            )
+            text = response.choices[0].message.content or ""
+            # Collapse to a single tidy line.
+            text = " ".join(text.split())
+            return text or None
+        except Exception:
+            logger.warning("Log comment generation failed; using heuristic", exc_info=True)
+            return None
 
     async def close(self) -> None:
         """Clean up LLM client resources."""

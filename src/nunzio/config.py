@@ -24,7 +24,7 @@ class LLMConfig(BaseModel):
     base_url: str = Field(
         default="http://localhost:8080", description="OpenAI-compatible API base URL"
     )
-    model: str = Field(default="qwen3.5-27b", description="Default model to use")
+    model: str = Field(default="gemma-4-27b", description="Default model to use")
     timeout: int = Field(default=60, description="Request timeout in seconds")
 
 

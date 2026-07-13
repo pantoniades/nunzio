@@ -92,3 +92,55 @@ def test_cardio_skips_weight_checks():
 
 def test_empty_logged_sets():
     assert MessageHandler._generate_log_comment([], [], NOW) is None
+
+
+def _logged(exercise_id, name, **kw):
+    base = {
+        "exercise_id": exercise_id,
+        "name": name,
+        "set_number": 1,
+        "weight": None,
+        "reps": None,
+        "unit": "lbs",
+        "duration_minutes": None,
+        "distance": None,
+        "notes": None,
+        "is_cardio": False,
+    }
+    base.update(kw)
+    return base
+
+
+def test_log_comment_summary_strength_with_history():
+    logged = [_logged(1, "Bench Press", weight=200.0, reps=5)]
+    history = [
+        _ws(1, weight=185.0, reps=5, weight_unit="lbs", duration_minutes=None),
+    ]
+    summary = MessageHandler._log_comment_summary(
+        logged, history, "New PR on Bench Press!"
+    )
+    assert "JUST LOGGED:" in summary
+    assert "Bench Press" in summary
+    assert "200" in summary
+    assert "PRIOR HISTORY:" in summary
+    assert "185" in summary
+    assert "SIGNAL: New PR on Bench Press!" in summary
+
+
+def test_log_comment_summary_first_time_has_no_prior():
+    logged = [_logged(9, "Arnold Press", weight=30.0, reps=10)]
+    summary = MessageHandler._log_comment_summary(
+        logged, [], "First time logging Arnold Press."
+    )
+    assert "JUST LOGGED:" in summary
+    assert "PRIOR HISTORY:" not in summary
+    assert "SIGNAL: First time logging Arnold Press." in summary
+
+
+def test_log_comment_summary_cardio():
+    logged = [_logged(2, "Elliptical", is_cardio=True, duration_minutes=21, distance=1.44)]
+    summary = MessageHandler._log_comment_summary(
+        logged, [], "Back at it after 100 days."
+    )
+    assert "Elliptical" in summary
+    assert "21 min" in summary
