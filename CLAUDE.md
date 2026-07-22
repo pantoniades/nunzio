@@ -99,8 +99,10 @@ This context block is injected into the user message alongside a coaching system
 - ~~**Edit individual sets.**~~ **Done.** `edit_set` intent routes "change reps to 12",
   "fix weight to 185", "edit last set", "#42 set 3 to 200 lbs" through Instructor
   extraction (`EditSetData` schema) to a repository update.
-- **Per-user timezone preferences.** Currently hardcoded to America/New_York. Needs a
-  `user_settings` table with `timezone` column. Defer until multi-user is actually needed.
+- ~~**Per-user timezone preferences.**~~ **Done (v0.7).** `user_settings` table
+  (`scripts/migrate_v07.py`) with a `timezone` column; a `set_timezone` intent resolves
+  the IANA name via the LLM and persists it (`core._handle_set_timezone`). No longer
+  hardcoded to America/New_York (that's just the default).
 - ~~**Specify Dates.**~~ **Done (v0.6).** Today's date injected into extraction prompt;
   LLM resolves relative dates ("yesterday", "on Monday", "Feb 15") to concrete
   `YYYY-MM-DD` via `WorkoutData.date` field. `core.py` uses extracted date when present,
@@ -134,12 +136,13 @@ This context block is injected into the user message alongside a coaching system
   (`user_id`, `weight`, `unit`, `recorded_at`, `notes`). Weigh-in delta vs. previous
   reading is shown on log ("↓ 2.3 lbs from last weigh-in on Mar 21"). View via
   `view_stats` with `stats_type="weight"`.
-- **Per-user settings table.** No `user_settings` table exists. The Apr 21 "Store as lb,
+- **Per-user settings — weight_unit + `set_preference`.** *Partially done (v0.7).* The
+  `user_settings` table now exists and timezone is wired through a `set_timezone` intent.
+  Still open: `weight_unit` remains per-set (`workout_sets.weight_unit`), not a user
+  preference, and there's no general `set_preference` intent. The Apr 21 "Store as lb,
   not kg" message hit the coaching path and the LLM hallucinated compliance — but the
-  next log was still in kg. Needs a real `user_settings` table (timezone, weight_unit)
-  plus a `set_preference` intent so preference statements stop falling through to
-  coaching. Until then, the coaching system prompt should at least say "I can't change
-  settings yet" instead of pretending to save them.
+  next log was still in kg. Needs a `weight_unit` column on `user_settings` plus a
+  `set_preference` intent so unit/preference statements stop falling through to coaching.
 - ~~**Bare "Edit" with no target.**~~ **Partially done (v0.8).** A bare "edit" now
   defaults to the most recent set and echoes it ("Editing Lat Pulldown 10×40 in #135 —
   what should I change?") instead of dead-ending. Supplying the value in a follow-up
