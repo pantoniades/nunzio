@@ -155,7 +155,11 @@ class EditSetData(BaseModel):
 
 class BodyWeightData(BaseModel):
     """Extracted body weight reading."""
-    weight: float = Field(description="Body weight value")
+    weight: float = Field(
+        gt=0.0,
+        le=1000.0,
+        description="Body weight value",
+    )
     unit: Literal["lbs", "kg"] = Field(
         default="lbs",
         description="Weight unit",

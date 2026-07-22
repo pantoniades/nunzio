@@ -192,6 +192,31 @@ class TrainingPrinciple(Base):
         return f"<TrainingPrinciple(id={self.id}, category='{self.category}', title='{self.title}')>"
 
 
+class ProactiveLog(Base):
+    """Record of proactive check-ins sent, so we never repeat the same nudge/congrats.
+
+    `kind` is the trigger type (pr, streak, nudge); `ref_key` uniquely identifies the
+    specific event within that kind (e.g. "pr:12:190" or "nudge:2026-07-13").
+    """
+
+    __tablename__ = "proactive_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    ref_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_now_nyc
+    )
+
+    __table_args__ = (
+        Index("idx_proactive_log_lookup", "user_id", "kind", "ref_key"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ProactiveLog(user_id={self.user_id}, kind='{self.kind}', ref_key='{self.ref_key}')>"
+
+
 class UserSettings(Base):
     """Per-user preferences. Currently just timezone, keyed by user_id."""
 

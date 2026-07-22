@@ -8,6 +8,7 @@ from ..database.models import now_in_tz
 from ..database.repository import (
     body_weight_repo,
     exercise_repo,
+    message_log_repo,
     training_principle_repo,
     workout_set_repo,
 )
@@ -15,6 +16,8 @@ from ..stats import compute_consistency
 from .schemas import UserIntent
 
 CARDIO_GROUPS = {"cardio"}
+# Primary resistance-training groups used for lagging-group detection.
+MAIN_GROUPS = ("chest", "back", "shoulders", "legs", "biceps", "triceps", "core")
 
 
 async def build_coaching_context(
@@ -52,8 +55,8 @@ async def build_coaching_context(
     if set(intent.mentioned_muscle_groups) & CARDIO_GROUPS:
         has_cardio = True
 
-    # 4. Training principles (top 6 by priority, plus cardio if relevant)
-    principles = await training_principle_repo.get_all_by_priority(session, limit=6)
+    # 4. Training principles (all, by priority; cardio pulled in above the rest if relevant)
+    principles = await training_principle_repo.get_all_by_priority(session, limit=20)
     if has_cardio:
         cardio_principles = await training_principle_repo.get_by_category(
             session, "cardio"
@@ -78,6 +81,18 @@ async def build_coaching_context(
     volume_section = await _build_volume_section(session, user_id)
     if volume_section:
         sections.append(volume_section)
+
+    # 6b. When no specific exercise was named, surface the lagging muscle group so the
+    # coach can volunteer a focus ("what should I train today?") instead of waiting.
+    if not matched_exercises:
+        lagging_section = await _build_lagging_groups_section(session, user_id)
+        if lagging_section:
+            sections.append(lagging_section)
+
+    # 6c. Short-term memory — the last few turns, for continuity across messages.
+    conversation_section = await _build_recent_conversation_section(session, user_id)
+    if conversation_section:
+        sections.append(conversation_section)
 
     # 7. Exercise details with history
     for exercise in matched_exercises:
@@ -115,7 +130,7 @@ async def build_coaching_context(
                 for ws in recent_sets:
                     by_batch.setdefault(ws.batch_id, []).append(ws)
 
-                for batch_id, sets in list(by_batch.items())[:8]:
+                for batch_id, sets in by_batch.items():
                     first = sets[0]
                     date_str = first.set_date.strftime("%b %d")
                     set_count = len(sets)
@@ -137,13 +152,16 @@ async def build_coaching_context(
                         line += f" ({'; '.join(batch_notes)})"
                     ex_lines.append(line)
 
-                # PR: heaviest weight × reps
-                pr_sets = [s for s in recent_sets if s.weight is not None]
-                if pr_sets:
-                    pr = max(pr_sets, key=lambda s: s.weight)
+                # PR: true all-time heaviest set for this exercise (not just within
+                # the recent window), so the coach prescribes against the real ceiling.
+                prs = await workout_set_repo.get_personal_records(
+                    session, exercise.id, user_id, limit=1
+                )
+                if prs:
+                    pr = prs[0]
                     pr_date = pr.set_date.strftime("%b %d")
                     ex_lines.append(
-                        f"PR: {pr.weight} {pr.weight_unit} x {pr.reps} reps ({pr_date})"
+                        f"PR (all-time): {pr.weight:g} {pr.weight_unit} x {pr.reps} reps ({pr_date})"
                     )
 
         sections.append("\n".join(ex_lines))
@@ -196,11 +214,64 @@ async def _build_volume_section(session: AsyncSession, user_id: int) -> str:
         weeks.setdefault(yw, []).append((mg, vol))
 
     lines = ["VOLUME (weekly tonnage by muscle group, recent first):"]
-    for yw, groups in list(weeks.items())[:4]:
+    for yw, groups in weeks.items():
         year = yw // 100
         week = yw % 100
         group_str = "; ".join(f"{mg} {vol:,.0f}" for mg, vol in groups)
         lines.append(f"- Wk {year}-{week:02d}: {group_str}")
+    return "\n".join(lines)
+
+
+def rank_lagging_groups(vol_by_group: dict) -> tuple[list, list]:
+    """Split MAIN_GROUPS into (trained-ranked-ascending-by-volume, untrained).
+
+    Pure helper so the lagging-group logic can be unit-tested without a DB.
+    """
+    ranked = sorted(
+        ((g, v) for g, v in vol_by_group.items() if g in MAIN_GROUPS),
+        key=lambda x: x[1],
+    )
+    untrained = [g for g in MAIN_GROUPS if g not in vol_by_group]
+    return ranked, untrained
+
+
+async def _build_lagging_groups_section(session: AsyncSession, user_id: int) -> str:
+    """Rank resistance groups by recent volume so the coach can steer to what's lagging."""
+    rows = await workout_set_repo.get_weekly_volume(session, user_id, weeks=4)
+    if not rows:
+        return ""  # no recent lifting to reason about — stay quiet
+
+    vol_by_group: dict[str, float] = {}
+    for _yw, mg, vol in rows:
+        vol_by_group[mg] = vol_by_group.get(mg, 0.0) + (vol or 0.0)
+
+    ranked, untrained = rank_lagging_groups(vol_by_group)
+    if not ranked and not untrained:
+        return ""
+
+    lines = ["LAGGING MUSCLE GROUPS (last 4 weeks, lowest volume / stalest first):"]
+    for g, v in ranked[:4]:
+        lines.append(f"- {g}: {v:,.0f} lbs")
+    for g in untrained:
+        lines.append(f"- {g}: not trained in the last 4 weeks")
+    return "\n".join(lines)
+
+
+async def _build_recent_conversation_section(session: AsyncSession, user_id: int) -> str:
+    """The last few turns for continuity. The current message isn't logged yet, so
+    every row here is a prior turn."""
+    logs = await message_log_repo.get_by_user(session, user_id, limit=4)
+    if not logs:
+        return ""
+
+    lines = ["RECENT CONVERSATION (oldest first):"]
+    for log in reversed(logs):  # get_by_user is newest-first
+        raw = (log.raw_message or "").strip().replace("\n", " ")
+        summary = (log.response_summary or "").strip().replace("\n", " ")
+        if raw:
+            lines.append(f"- You: {raw[:100]}")
+        if summary:
+            lines.append(f"  Nunzio: {summary[:120]}")
     return "\n".join(lines)
 
 

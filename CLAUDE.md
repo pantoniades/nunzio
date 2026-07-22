@@ -36,13 +36,22 @@ What works:
 - Notes extraction: LLM prompt extracts subjective observations and equipment modifiers into `notes` field, keeping exercise names clean
 - Sensible defaults: missing reps default to 10 for strength sets (shown as "assumed" in response)
 - Coaching context includes set notes (pain, effort, equipment) in history lines
-- Message logging: every message logged to `message_log` table with intent, confidence, and response summary
+- Message logging: every message logged to `message_log` table with intent, confidence, and response summary (v0.8: `extracted_data` now stores the classified intent JSON)
+
+### v0.8 additions
+- Default model switched to `gemma-4-27b` (was `qwen3.5-27b`); `edit_set` extraction routed through Instructor `Mode.TOOLS` because gemma returns all-null on the all-optional `EditSetData` schema under JSON mode
+- Reps/weight inversion guard: unitless "8x30" that the extractor flips to 30 reps @ 8 lb is corrected back to 8 reps @ 30 lb (with a "say 'edit' if I flipped it" note); a new `NxM` rule in the extraction prompt prevents most flips upstream
+- Body-weight plausibility guard: an implausible reading (e.g. "20 lb") is rejected with guidance instead of silently stored; weigh-in delta reconciles kg↔lb units before subtracting
+- Hybrid log comments: notable logs get an LLM-written, numbers-grounded one-liner (heuristic fallback)
+- Coaching overhaul: true all-time PRs (not window-local), no more truncation of fetched volume/history, a LAGGING MUSCLE GROUPS block when no exercise is named, and a short RECENT CONVERSATION memory block
+- Proactive check-ins via PTB JobQueue (`checkin.py`): PR congrats / streak milestones / inactivity nudges with a focus suggestion, deduped in `proactive_log`
+- UX: bare "edit" echoes the target set; "more" paginates the stats overview; category queries ("what aerobic have I done") summarize a muscle group
 
 ## Architecture
 
 **Two interfaces, shared core** — `core.MessageHandler` owns all message processing logic. The CLI (`cli.py`) and Telegram bot (`bot.py`) are thin wrappers. The handler takes a `verbose` flag: CLI gets session IDs and debug detail, the bot gets cleaner output.
 
-**Intent routing** — 5 intents: `log_workout`, `view_stats`, `coaching` (catch-all), `delete_workout`, `repeat_last`. `view_stats` sub-routes by `stats_type` field on `UserIntent`: overview (default), prs, exercise_history, volume, consistency.
+**Intent routing** — 9 intents: `log_workout`, `log_weight`, `set_timezone`, `view_stats`, `list_workouts`, `edit_set`, `delete_workout`, `repeat_last`, and `coaching` (catch-all). `view_stats` sub-routes by `stats_type` field on `UserIntent`: overview (default), prs, exercise_history, volume, consistency, weight, last_session.
 
 **Coaching pipeline** — `build_coaching_context()` in `llm/context.py` assembles:
 1. Training principles by priority (top 6, plus cardio principle if relevant)
@@ -52,11 +61,15 @@ What works:
 
 This context block is injected into the user message alongside a coaching system prompt. The LLM generates free-text advice (NOT Instructor — raw completions).
 
-**Instructor mode** — Uses `instructor.Mode.JSON` (not TOOLS) because some models generate multiple tool calls which Instructor can't handle.
+**Instructor mode** — Uses `instructor.Mode.JSON` (not TOOLS) because some models generate multiple tool calls which Instructor can't handle. **Exception:** `edit_set` extraction uses `Mode.TOOLS` — the all-optional `EditSetData` schema causes `gemma-4-27b` to return an all-null object under JSON mode, but it extracts correctly under TOOLS (and so does qwen). The client holds two instructor clients (`_instructor_client` JSON, `_instructor_tools_client` TOOLS).
+
+**Proactive check-ins** — `checkin.py` runs as an in-process PTB JobQueue job (hourly, wired in `bot.py` `_post_init`). For each recipient whose local time is `CHECKIN_HOUR`, `compute_checkin()` picks the top-priority trigger (fresh PR > streak milestone > inactivity nudge with a suggested lagging-group focus) and sends one message via `bot.send_message`, deduped through the `proactive_log` table. Recipients come from `TELEGRAM__ALLOWED_USER_IDS` (or all logged users if unrestricted, never `user_id=0`). Requires the `python-telegram-bot[job-queue]` extra.
+
+**Log comments (hybrid)** — After a log, `_generate_log_comment()` heuristic decides if anything's notable (PR/first-time/gap/weight-up/pain). If so, it's upgraded to an LLM-written, numbers-grounded one-liner via `LLMClient.generate_log_comment()`; on any failure it falls back to the heuristic string.
 
 ## Infrastructure
 
-- **LLM**: OpenAI-compatible API (currently llama-swap on `odysseus:11500`), model `qwen3.5-27b` (configurable via .env)
+- **LLM**: OpenAI-compatible API (currently llama-swap on `odysseus:11500`), default model `gemma-4-27b` (configurable via .env; `qwen3.5-27b` and `qwen3-coder-30b` also in the resident-reuse allowlist)
 - **DB**: MySQL on `odysseus:3306`, database `nunzio_workouts`
 - **Structured extraction**: Instructor library (JSON mode) wrapping OpenAI client for Pydantic model output
 - **Container**: Podman via multi-stage Containerfile (built with `uv`, not pip), runs `nunzio-bot` by default. Config via `--env-file`.
@@ -67,7 +80,8 @@ This context block is injected into the user message alongside a coaching system
 - `workout_sets` table: `user_id` BIGINT, `batch_id` INT, `set_date` DATETIME (NYC tz), `exercise_id` FK, `set_number`, `reps` (nullable), `weight` FLOAT, `weight_unit`, `duration_minutes`, `distance`, `raw_exercise_name`, `notes`, `created_at`
 - `exercises` table: `name`, `muscle_group`, `description`, `guidance`, `created_at`
 - `training_principles` table: `category`, `title`, `content`, `priority`
-- `message_log` table: `user_id`, `raw_message`, `classified_intent`, `confidence`, `extracted_data`, `response_summary`, `created_at`
+- `message_log` table: `user_id`, `raw_message`, `classified_intent`, `confidence`, `extracted_data` (now populated with the classified `UserIntent` JSON), `response_summary`, `created_at`
+- `proactive_log` table (v0.8): `user_id`, `kind` (pr/streak/nudge), `ref_key`, `sent_at` — dedup for proactive check-ins. Created by `scripts/migrate_v08.py` (idempotent, non-destructive)
 - **Dropped**: `workout_sessions` table (v0.5 — flattened into workout_sets)
 - v0.5 migration: `scripts/migrate_v05.py` (backfills user_id/set_date/batch_id from sessions, drops session_id + workout_sessions)
 
@@ -98,17 +112,16 @@ This context block is injected into the user message alongside a coaching system
   changing `LLM__BASE_URL` and `LLM__MODEL` in `.env`.
 - **Web search for recommendations**: Let Nunzio search the web to give better, more
   contextual workout suggestions instead of just listing exercises from the DB.
-- ~~**Personality on log responses.**~~ **Done (v0.5).** Heuristic one-liners after
-  logging: new PR, first time, back after gap, weight increase, pain warning. Pure code
-  via `_generate_log_comment()`. Future: multiple phrasings per heuristic, lightweight
-  LLM call for real personality, tone configuration (encouraging/blunt/sarcastic),
-  multi-session trend awareness.
-- **Proactive check-ins (cron).** Nunzio should reach out unprompted via Telegram:
-  congratulate when a session shows upward trends (new PR, volume increase, consistency
-  streak), and nudge if the user hasn't logged a workout in N days. Needs a scheduled
-  job (cron or async loop) that queries recent history per user, runs trend detection,
-  and sends a message through the bot. Personality lives here too — tone, encouragement
-  style, how blunt the nudges are.
+- ~~**Personality on log responses.**~~ **Done (v0.5; upgraded v0.8).** Heuristic
+  one-liners (new PR, first time, back after gap, weight increase, pain warning), now
+  hybrid: when the heuristic fires, an LLM writes a numbers-grounded one-liner via
+  `LLMClient.generate_log_comment()`, falling back to the heuristic on any failure.
+  Future: tone configuration (encouraging/blunt/sarcastic).
+- ~~**Proactive check-ins.**~~ **Done (v0.8).** `checkin.py` runs as an in-process PTB
+  JobQueue job (hourly). Per user, in their local timezone, it picks the top-priority
+  trigger — fresh PR > streak milestone > inactivity nudge (with a lagging-group focus
+  suggestion) — and sends one Telegram message, deduped via the `proactive_log` table.
+  Future: richer tone/personality, volume-trend congratulations, per-user check-in hour.
 - ~~**Extract equipment/variant modifiers into set notes.**~~ **Done (v0.4).** Extraction
   prompt now tells the LLM to put subjective observations (pain, effort, mood) and
   equipment modifiers (band color, grip width, tempo) into `notes`, keeping exercise
@@ -127,10 +140,10 @@ This context block is injected into the user message alongside a coaching system
   plus a `set_preference` intent so preference statements stop falling through to
   coaching. Until then, the coaching system prompt should at least say "I can't change
   settings yet" instead of pretending to save them.
-- **Bare "Edit" with no target.** "Edit" alone returns "I couldn't figure out what to
-  change", forcing the user to retype the full command. Needs at minimum a default
-  scope (most recent set) plus a prompt for the value. A real fix needs conversation
-  state.
+- ~~**Bare "Edit" with no target.**~~ **Partially done (v0.8).** A bare "edit" now
+  defaults to the most recent set and echoes it ("Editing Lat Pulldown 10×40 in #135 —
+  what should I change?") instead of dead-ending. Supplying the value in a follow-up
+  still needs conversation state (not yet built).
 - ~~Richer stats (PRs, volume trends, per-exercise history)~~ **Done (v0.5).** `view_stats`
   sub-routes by `stats_type`. PRs, exercise history, weekly volume by muscle group,
   consistency metrics (streak, avg gap, 30/90-day counts).

@@ -1,6 +1,5 @@
 """Telegram bot interface for Nunzio workout assistant."""
 
-import asyncio
 import logging
 import sys
 from urllib.parse import urlparse
@@ -8,10 +7,16 @@ from urllib.parse import urlparse
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
+from .checkin import run_checkins
 from .config import config
 from .core import MessageHandler as NunzioHandler
+from .database.connection import db_manager
+from .database.repository import workout_set_repo
 
 logger = logging.getLogger(__name__)
+
+# How often the check-in job wakes to look for users due a proactive message.
+_CHECKIN_INTERVAL_SECONDS = 3600
 
 
 class NunzioBot:
@@ -56,7 +61,37 @@ class NunzioBot:
 
     async def _post_init(self, app: Application) -> None:
         await self._handler.initialize()
+        if app.job_queue is not None:
+            app.job_queue.run_repeating(
+                self._checkin_job, interval=_CHECKIN_INTERVAL_SECONDS, first=60
+            )
+            logger.info("Proactive check-in job scheduled (hourly)")
+        else:
+            logger.warning(
+                "JobQueue unavailable — install python-telegram-bot[job-queue] to "
+                "enable proactive check-ins"
+            )
         logger.info("Nunzio bot initialized (DB + LLM ready)")
+
+    async def _checkin_recipients(self) -> list[int]:
+        """Users eligible for proactive check-ins: the allowlist, or every logged
+        user when no allowlist is configured (never the CLI's user_id=0)."""
+        if self._allowed_users:
+            return list(self._allowed_users)
+        async with db_manager.get_session() as session:
+            ids = await workout_set_repo.get_distinct_user_ids(session)
+        return [uid for uid in ids if uid != 0]
+
+    async def _checkin_job(self, context) -> None:
+        try:
+            recipients = await self._checkin_recipients()
+            if not recipients:
+                return
+            sent = await run_checkins(context.bot, recipients)
+            if sent:
+                logger.info("Proactive check-ins sent: %d", sent)
+        except Exception:
+            logger.exception("Check-in job failed")
 
     async def _post_shutdown(self, app: Application) -> None:
         await self._handler.close()

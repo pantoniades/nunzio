@@ -13,6 +13,7 @@ from .models import (
     DEFAULT_TZ,
     Exercise,
     MessageLog,
+    ProactiveLog,
     TrainingPrinciple,
     UserSettings,
     WorkoutSet,
@@ -438,6 +439,12 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
         result = await session.execute(stmt, {"uid": user_id, "days": days})
         return [row[0] for row in result.fetchall()]
 
+    async def get_distinct_user_ids(self, session: AsyncSession) -> List[int]:
+        """All distinct user_ids that have logged sets (for proactive check-ins)."""
+        stmt = select(WorkoutSet.user_id).distinct()
+        result = await session.execute(stmt)
+        return [row[0] for row in result.fetchall()]
+
 
 class BodyWeightRepository(BaseRepository[BodyWeight, dict, dict]):
     """Repository for BodyWeight operations."""
@@ -510,6 +517,24 @@ class MessageLogRepository(BaseRepository[MessageLog, dict, dict]):
         return list(result.scalars().all())
 
 
+class ProactiveLogRepository(BaseRepository[ProactiveLog, dict, dict]):
+    """Repository for proactive check-in dedup records."""
+
+    async def already_sent(
+        self, session: AsyncSession, user_id: int, kind: str, ref_key: str
+    ) -> bool:
+        """True if a check-in of this kind/ref has already been sent to the user."""
+        stmt = (
+            select(ProactiveLog.id)
+            .where(ProactiveLog.user_id == user_id)
+            .where(ProactiveLog.kind == kind)
+            .where(ProactiveLog.ref_key == ref_key)
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
+
 class UserSettingsRepository(BaseRepository[UserSettings, dict, dict]):
     """Repository for per-user settings (timezone, etc.)."""
 
@@ -540,4 +565,5 @@ workout_set_repo = WorkoutSetRepository(WorkoutSet)
 body_weight_repo = BodyWeightRepository(BodyWeight)
 training_principle_repo = TrainingPrincipleRepository(TrainingPrinciple)
 message_log_repo = MessageLogRepository(MessageLog)
+proactive_log_repo = ProactiveLogRepository(ProactiveLog)
 user_settings_repo = UserSettingsRepository(UserSettings)

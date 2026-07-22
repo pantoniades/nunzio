@@ -33,16 +33,22 @@ the other services under `~/Deploy`). Make sure it exists and is filled in.
 - `TELEGRAM__ALLOWED_USER_IDS=[<your id>]` (recommended)
 - `ENVIRONMENT=production`
 
-### 3. Apply the schema migration (adds the `user_settings` table)
+### 3. Apply the schema migrations
 
 The database already exists with real data, so **do not** run
-`scripts/create_tables.py` (it drops tables). Run the non-destructive migration
-instead — it only creates `user_settings` if it's missing:
+`scripts/create_tables.py` (it drops tables). Run the non-destructive migrations
+instead — each only creates its table if missing and is safe to re-run:
 
 ```bash
-# from a venv with the project installed (pip install -e .)
-python scripts/migrate_v07.py
+# from a venv with the project installed (uv pip install -e ".[dev]")
+python scripts/migrate_v07.py   # user_settings (per-user timezone)
+python scripts/migrate_v08.py   # proactive_log (proactive check-in dedup)
 ```
+
+> **v0.8 needs the JobQueue extra.** Proactive check-ins run on
+> `python-telegram-bot[job-queue]`, which is now in `pyproject.toml`, so a fresh
+> `uv pip install -e .` / rebuilt image picks it up automatically. If the bot logs
+> "JobQueue unavailable", the extra didn't install.
 
 ### 4. Install and start the service
 
@@ -93,7 +99,7 @@ git pull --ff-only
 podman build --format docker -t localhost/nunzio:latest .
 
 # 4. Run any new DB migration (see "migrations" note below).
-venv/bin/python scripts/migrate_v0X.py    # only if a migration was added
+venv/bin/python scripts/migrate_v08.py    # latest; idempotent, safe to re-run
 
 # 5. Restart the service onto the new image.
 systemctl --user restart nunzio

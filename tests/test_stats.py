@@ -1,11 +1,40 @@
 """Tests for stats sub-handlers — consistency computation and helpers."""
 
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 from nunzio.core import MessageHandler
 
 
 TODAY = date.today()
+
+
+def test_is_more_request():
+    assert MessageHandler._is_more_request("more")
+    assert MessageHandler._is_more_request("More")
+    assert MessageHandler._is_more_request(" next ")
+    assert MessageHandler._is_more_request("older")
+    assert MessageHandler._is_more_request("show more")
+    assert not MessageHandler._is_more_request("show my stats")
+    assert not MessageHandler._is_more_request("more bench press")
+    assert not MessageHandler._is_more_request("")
+
+
+def test_resolve_muscle_group_from_exercise_word():
+    intent = SimpleNamespace(mentioned_muscle_groups=[], mentioned_exercises=["aerobic"])
+    assert MessageHandler._resolve_muscle_group(intent) == "cardio"
+
+
+def test_resolve_muscle_group_from_group():
+    intent = SimpleNamespace(mentioned_muscle_groups=["cardio"], mentioned_exercises=[])
+    assert MessageHandler._resolve_muscle_group(intent) == "cardio"
+
+
+def test_resolve_muscle_group_none_for_specific_exercise():
+    intent = SimpleNamespace(
+        mentioned_muscle_groups=[], mentioned_exercises=["bench press"]
+    )
+    assert MessageHandler._resolve_muscle_group(intent) is None
 
 
 def test_consistency_no_workouts():
