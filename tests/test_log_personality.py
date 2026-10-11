@@ -144,3 +144,29 @@ def test_log_comment_summary_cardio():
     )
     assert "Elliptical" in summary
     assert "21 min" in summary
+
+
+def test_log_comment_summary_lighter_set_flagged():
+    """A load below the last session is flagged as a warm-up/back-off, not a regression."""
+    yesterday = NOW - timedelta(days=1)
+    logged = [_logged(1, "Bench Press", weight=45.0, reps=12)]
+    history = [_ws(1, weight=55.0, reps=12, weight_unit="lbs",
+                   duration_minutes=None, set_date=yesterday)]
+    summary = MessageHandler._log_comment_summary(
+        logged, history, "Back at it after 5 days."
+    )
+    assert "NOTE:" in summary
+    assert "warm-up" in summary
+    assert "NOT a regression" in summary
+
+
+def test_log_comment_summary_heavier_set_not_flagged():
+    """A load at or above the last session gets no lighter-set note."""
+    yesterday = NOW - timedelta(days=1)
+    logged = [_logged(1, "Bench Press", weight=60.0, reps=12)]
+    history = [_ws(1, weight=55.0, reps=12, weight_unit="lbs",
+                   duration_minutes=None, set_date=yesterday)]
+    summary = MessageHandler._log_comment_summary(
+        logged, history, "Moving up in weight on Bench Press."
+    )
+    assert "NOTE:" not in summary

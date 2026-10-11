@@ -28,7 +28,7 @@ What works:
 - Delete/undo workouts: "undo", "delete last", "delete #42" — routed via `delete_workout` intent
 - Edit individual sets: "change reps to 12", "fix weight to 185", "edit last set" — routed via `edit_set` intent (LLM extracts which set + what to change)
 - Body weight tracking: "weighed 191.4 lb" — routed via `log_weight` intent, persisted in `body_weight` table, weigh-in trends shown on log
-- Repeat last workout: "again", "repeat last" — clones most recent batch via `repeat_last` intent. Inline override syntax: "again 10x55" or "Another, 10x50 kg" applies reps and weight overrides (regex-parsed, no LLM call)
+- Repeat last workout: "again", "repeat last" — clones most recent batch via `repeat_last` intent. Inline override syntax (regex-parsed, no LLM call): "again 10x55" / "again 12@30" / "Another, 10x50 kg" override reps and weight; "again 2x12@55", "2 more sets @20 lb", "one more set" log N sets of the most recent set (not a clone of the whole batch); "twice"/"x2" repeats the whole batch
 - Resident-model reuse: when llama-swap has a model from the JSON-mode allowlist (`qwen3.5-27b`, `qwen3-coder-30b`, `gemma-4-27b`) already loaded, Nunzio uses it to skip swap latency. Other resident models force a swap back to the configured default. Override is shown in the response footer and logged at INFO on transitions.
 - Scored exercise matching: word-overlap Jaccard replaces ILIKE `%query%`. Exact match → use it, score ≥ 0.5 → use it (show mapping), score < 0.5 → create ad-hoc exercise with user's exact name
 - Raw exercise name preserved: `workout_sets.raw_exercise_name` stores what the user actually said. Response shows mapping when names differ (e.g. `Dumbbell Flyes (from "dumbbell fly")`)
@@ -44,7 +44,7 @@ What works:
 - Body-weight plausibility guard: an implausible reading (e.g. "20 lb") is rejected with guidance instead of silently stored; weigh-in delta reconciles kg↔lb units before subtracting
 - Hybrid log comments: notable logs get an LLM-written, numbers-grounded one-liner (heuristic fallback)
 - Coaching overhaul: true all-time PRs (not window-local), no more truncation of fetched volume/history, a LAGGING MUSCLE GROUPS block when no exercise is named, and a short RECENT CONVERSATION memory block
-- Proactive check-ins via PTB JobQueue (`checkin.py`): PR congrats / streak milestones / inactivity nudges with a focus suggestion, deduped in `proactive_log`
+- Proactive check-ins via PTB JobQueue (`checkin.py`): PR congrats / streak milestones / inactivity nudges with a focus suggestion, deduped in `proactive_log`; inactivity nudges start at 3+ days and never fire more often than every other day
 - UX: bare "edit" echoes the target set; "more" paginates the stats overview; category queries ("what aerobic have I done") summarize a muscle group
 
 ## Architecture
@@ -65,7 +65,7 @@ This context block is injected into the user message alongside a coaching system
 
 **Proactive check-ins** — `checkin.py` runs as an in-process PTB JobQueue job (hourly, wired in `bot.py` `_post_init`). For each recipient whose local time is `CHECKIN_HOUR`, `compute_checkin()` picks the top-priority trigger (fresh PR > streak milestone > inactivity nudge with a suggested lagging-group focus) and sends one message via `bot.send_message`, deduped through the `proactive_log` table. Recipients come from `TELEGRAM__ALLOWED_USER_IDS` (or all logged users if unrestricted, never `user_id=0`). Requires the `python-telegram-bot[job-queue]` extra.
 
-**Log comments (hybrid)** — After a log, `_generate_log_comment()` heuristic decides if anything's notable (PR/first-time/gap/weight-up/pain). If so, it's upgraded to an LLM-written, numbers-grounded one-liner via `LLMClient.generate_log_comment()`; on any failure it falls back to the heuristic string.
+**Log comments (hybrid)** — After a log, `_generate_log_comment()` heuristic decides if anything's notable (PR/first-time/gap/weight-up/pain). If so, it's upgraded to an LLM-written, numbers-grounded one-liner via `LLMClient.generate_log_comment()`; on any failure it falls back to the heuristic string. **Tone guardrail (v0.8.1):** the comment/coaching prompts are supportive, not harsh — a load below the last session is treated as a warm-up / back-off / easing-in, never a "step down" or "setback" to scold, and increases are offered, not demanded. `_log_comment_summary()` emits an explicit `NOTE:` line whenever the just-logged top weight is below the last session so the model doesn't misread a warm-up as a regression.
 
 ## Infrastructure
 

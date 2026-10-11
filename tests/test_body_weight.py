@@ -1,6 +1,5 @@
 """Tests for body weight tracking."""
 
-import re
 
 import pytest
 
