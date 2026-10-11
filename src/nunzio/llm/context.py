@@ -1,6 +1,7 @@
 """Coaching context assembly — pulls history, guidance, and principles into a prompt block."""
 
 from collections import OrderedDict
+from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,6 +82,12 @@ async def build_coaching_context(
     volume_section = await _build_volume_section(session, user_id)
     if volume_section:
         sections.append(volume_section)
+
+    # 6a. The athlete's actual exercise roster and last working sets, so the coach
+    # prescribes from what they really do (not textbook barbell defaults).
+    roster_section = await _build_roster_section(session, user_id, user_tz)
+    if roster_section:
+        sections.append(roster_section)
 
     # 6b. When no specific exercise was named, surface the lagging muscle group so the
     # coach can volunteer a focus ("what should I train today?") instead of waiting.
@@ -219,6 +226,62 @@ async def _build_volume_section(session: AsyncSession, user_id: int) -> str:
         week = yw % 100
         group_str = "; ".join(f"{mg} {vol:,.0f}" for mg, vol in groups)
         lines.append(f"- Wk {year}-{week:02d}: {group_str}")
+    return "\n".join(lines)
+
+
+async def _build_roster_section(
+    session: AsyncSession, user_id: int, user_tz: str, *, days: int = 90
+) -> str:
+    """Every exercise trained in the last `days`, with its most recent session."""
+    now = now_in_tz(user_tz).replace(tzinfo=None)
+    sets = await workout_set_repo.get_sets_for_date_range(
+        session, user_id, now - timedelta(days=days), now + timedelta(days=1)
+    )
+    return summarize_roster(sets, days=days)
+
+
+def _fmt_set(ws, unit: str | None) -> str:
+    """'12x55' / '12x20 kg' / '12' (bodyweight) / '21 min'."""
+    if ws.duration_minutes:
+        return f"{ws.duration_minutes:g} min"
+    reps = ws.reps if ws.reps is not None else "?"
+    if ws.weight is None:
+        return f"{reps}"
+    w = f"{ws.weight:g}"
+    return f"{reps}x{w}" + (f" {ws.weight_unit}" if ws.weight_unit != unit else "")
+
+
+def summarize_roster(sets: list, *, days: int = 90, limit: int = 15) -> str:
+    """Pure: group sets (newest-first) by exercise into one line each.
+
+    Each line shows the date and sets of the most recent session plus how many
+    sessions (distinct days) the exercise had in the window.
+    """
+    by_ex: OrderedDict[int, list] = OrderedDict()
+    for ws in sets:
+        by_ex.setdefault(ws.exercise_id, []).append(ws)
+    if not by_ex:
+        return ""
+
+    lines = [
+        f"YOUR EXERCISES (everything logged in the last {days} days, most recent "
+        "first; last session's sets in order, reps x weight):"
+    ]
+    for ex_sets in list(by_ex.values())[:limit]:
+        first = ex_sets[0]
+        name = first.exercise.name if first.exercise else f"exercise #{first.exercise_id}"
+        last_day = first.set_date.date()
+        session_sets = [s for s in ex_sets if s.set_date.date() == last_day]
+        session_sets.sort(key=lambda s: (s.set_date, s.batch_id, s.set_number))
+        unit = first.weight_unit if first.weight is not None else None
+        sets_str = ", ".join(_fmt_set(s, unit) for s in session_sets)
+        if unit:
+            sets_str += f" {unit}"
+        n_sessions = len({s.set_date.date() for s in ex_sets})
+        lines.append(
+            f"- {name}: last {last_day.strftime('%b %d')}: {sets_str} "
+            f"({n_sessions} session{'s' if n_sessions != 1 else ''})"
+        )
     return "\n".join(lines)
 
 
