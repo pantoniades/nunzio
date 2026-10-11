@@ -60,16 +60,18 @@ What works:
 **Intent routing** — 9 intents: `log_workout`, `log_weight`, `set_timezone`, `view_stats`, `list_workouts`, `edit_set`, `delete_workout`, `repeat_last`, and `coaching` (catch-all). `view_stats` sub-routes by `stats_type` field on `UserIntent`: overview (default), prs, exercise_history, volume, consistency, weight, last_session.
 
 **Coaching pipeline** — `build_coaching_context()` in `llm/context.py` assembles:
-1. Training principles by priority (top 6, plus cardio principle if relevant)
-2. Matched exercise details (fuzzy-matched from intent extraction)
-3. Per-exercise guidance text (from `exercises.guidance` column)
-4. Recent workout history per exercise (last 10 sets, grouped by batch_id, with PR)
+1. Training principles by priority (plus cardio principles if relevant)
+2. CONSISTENCY and weekly VOLUME by muscle group
+3. YOUR EXERCISES — every exercise from the last 90 days with its last session's sets (`summarize_roster()`, v0.9)
+4. LAGGING MUSCLE GROUPS (only when no exercise is named) and RECENT CONVERSATION
+5. Matched exercises: guidance text, recent history grouped by batch_id, all-time PR
+6. BODY WEIGHT readings and trend
 
-This context block is injected into the user message alongside a coaching system prompt. The LLM generates free-text advice (NOT Instructor — raw completions).
+This context block is injected into the user message alongside a coaching system prompt. The LLM generates free-text advice (NOT Instructor — raw completions). The system prompt restricts prescriptions to the YOUR EXERCISES roster (unless the user asks for something new), uses the last working sets in the same unit, never goes above the last working weight after a gap of a week or more, and bans textbook loads and `[placeholder]` weights. Before v0.9 it prescribed squat 135 / bench 95 to a user whose bench was 55.
 
 **Instructor mode** — Uses `instructor.Mode.JSON` (not TOOLS) because some models generate multiple tool calls which Instructor can't handle. **Exception:** `edit_set` extraction uses `Mode.TOOLS` — the all-optional `EditSetData` schema causes `gemma-4-27b` to return an all-null object under JSON mode, but it extracts correctly under TOOLS (and so does qwen). The client holds two instructor clients (`_instructor_client` JSON, `_instructor_tools_client` TOOLS).
 
-**Proactive check-ins** — `checkin.py` runs as an in-process PTB JobQueue job (hourly, wired in `bot.py` `_post_init`). For each recipient whose local time is `CHECKIN_HOUR`, `compute_checkin()` picks the top-priority trigger (fresh PR > streak milestone > inactivity nudge with a suggested lagging-group focus) and sends one message via `bot.send_message`, deduped through the `proactive_log` table. Recipients come from `TELEGRAM__ALLOWED_USER_IDS` (or all logged users if unrestricted, never `user_id=0`). Requires the `python-telegram-bot[job-queue]` extra.
+**Proactive check-ins** — `checkin.py` runs as an in-process PTB JobQueue job (hourly, wired in `bot.py` `_post_init`). For each recipient whose local time is `CHECKIN_HOUR`, `compute_checkin()` picks the top-priority trigger (fresh PR > streak milestone > inactivity nudge with a suggested lagging-group focus) and sends one message via `bot.send_message`, deduped through the `proactive_log` table. Nudges need 3+ idle days and at least 2 days since the last nudge (`_MIN_DAYS_BETWEEN_NUDGES`, checked via `proactive_log_repo.last_sent_at`) — the user asked for never more than every other day after getting 15 daily nudges in a row. Recipients come from `TELEGRAM__ALLOWED_USER_IDS` (or all logged users if unrestricted, never `user_id=0`). Requires the `python-telegram-bot[job-queue]` extra.
 
 **Log comments (hybrid)** — After a log, `_generate_log_comment()` heuristic decides if anything's notable (PR/first-time/gap/weight-up/pain). If so, it's upgraded to an LLM-written, numbers-grounded one-liner via `LLMClient.generate_log_comment()`; on any failure it falls back to the heuristic string. **Tone guardrail (v0.8.1):** the comment/coaching prompts are supportive, not harsh — a load below the last session is treated as a warm-up / back-off / easing-in, never a "step down" or "setback" to scold, and increases are offered, not demanded. `_log_comment_summary()` emits an explicit `NOTE:` line whenever the just-logged top weight is below the last session so the model doesn't misread a warm-up as a regression.
 
@@ -81,7 +83,7 @@ This context block is injected into the user message alongside a coaching system
 - **Container**: Podman via multi-stage Containerfile (built with `uv`, not pip), runs `nunzio-bot` by default. Config via `--env-file`.
 - **Deployment**: runs full-time on odysseus as a rootless Podman Quadlet systemd service (`nunzio.service`), monitored by `~/admin/health-check.sh`. Two clones: `~/Projects/nunzio` (dev) and `~/Deploy/nunzio` (build/run, holds the live `.env`). Redeploy + host-specific gotchas (uv, `--format docker`, migrations) documented in [`deploy/README.md`](deploy/README.md).
 
-## Schema (v0.5 — flat model)
+## Schema (flat model since v0.5)
 
 - `workout_sets` table: `user_id` BIGINT, `batch_id` INT, `set_date` DATETIME (NYC tz), `exercise_id` FK, `set_number`, `reps` (nullable), `weight` FLOAT, `weight_unit`, `duration_minutes`, `distance`, `raw_exercise_name`, `notes`, `created_at`
 - `exercises` table: `name`, `muscle_group`, `description`, `guidance`, `created_at`
@@ -92,6 +94,8 @@ This context block is injected into the user message alongside a coaching system
 - v0.5 migration: `scripts/migrate_v05.py` (backfills user_id/set_date/batch_id from sessions, drops session_id + workout_sessions)
 
 ## Development Discipline
+
+- **Commit straight to `master` and push** — single developer, no feature branches or PRs. Deploy steps (build in `~/Deploy/nunzio`, then the user restarts `nunzio.service`) are in `deploy/README.md`.
 
 - **Run tests before considering any change done.** `pytest tests/` is the bar for "finished."
 - **Write at least a smoke test when adding a new feature** — don't move on without one. The coaching context pipeline shipped with zero tests and the intent rename silently broke existing ones. That's what happens when tests aren't part of the workflow.
@@ -156,5 +160,11 @@ This context block is injected into the user message alongside a coaching system
 - ~~Richer stats (PRs, volume trends, per-exercise history)~~ **Done (v0.5).** `view_stats`
   sub-routes by `stats_type`. PRs, exercise history, weekly volume by muscle group,
   consistency metrics (streak, avg gap, 30/90-day counts).
+- **Telegram error handler.** PTB logs "No error handlers are registered" on transient
+  `NetworkError: Bad Gateway` from Telegram. Harmless, but register a handler that logs
+  at WARNING without a traceback.
+- **Review real usage regularly.** `message_log` for the real Telegram user (all other
+  user_ids are test fixtures) is the best source of next fixes — v0.9 came entirely
+  from reviewing Jul–Oct usage.
 - Conversation context / multi-turn workout logging
 - Proper test coverage with mocked LLM/DB (current tests hit real services)

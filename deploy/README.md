@@ -99,7 +99,11 @@ git pull --ff-only
 podman build --format docker -t localhost/nunzio:latest .
 
 # 4. Run any new DB migration (see "migrations" note below).
-venv/bin/python scripts/migrate_v08.py    # latest; idempotent, safe to re-run
+venv/bin/python scripts/migrate_v08.py    # schema; idempotent, safe to re-run
+#    v0.9's migrate_v09.py is a *data* cleanup: dry run by default, --apply to write.
+#    Already applied to the live DB on 2026-10-11. Back up first if you ever re-run it:
+#    MYSQL_PWD=... mysqldump -h odysseus -u nunzio --single-transaction --no-tablespaces \
+#      nunzio_workouts exercises workout_sets > backups/pre_<change>_$(date +%Y%m%d).sql
 
 # 5. Restart the service onto the new image.
 systemctl --user restart nunzio
@@ -125,6 +129,9 @@ journalctl --user -u nunzio -n 30         # confirm "Application started"
   non-destructive; safe to re-run.
 - **One Telegram poller at a time** — don't run the bot by hand (CLI/tmux) while
   the service is up; the second `getUpdates` gets a 409.
+- **`systemctl --user` needs your user session.** Run it as `philip` (not root/sudo)
+  in a shell with `XDG_RUNTIME_DIR=/run/user/1000`; otherwise it reports
+  "Unit nunzio.service not found" even though the unit is installed.
 
 ## Notes
 
