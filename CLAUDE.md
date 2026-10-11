@@ -41,7 +41,7 @@ What works:
 ### v0.9 additions
 - Coaching gets a YOUR EXERCISES block (every exercise from the last 90 days with its last session's sets); the prompt prescribes only from that roster, stays at or below the last working weight after a gap, and never emits textbook loads or `[placeholder]` weights
 - Relative edits: "5lb more", "2 fewer reps", "add 5" are parsed in code (`_parse_relative_edit`) and applied as deltas — the extractor reads them as absolute values
-- A bare "12@55" (no exercise named) continues the last logged exercise instead of creating "Unknown Exercise"
+- A bare set ("12@55", "10x45 lb", "2x12@55, easy") is logged as the last exercise: `_is_bare_set()` prefixes the last exercise name in code *before* classification (the LLM had routed a bare "10x45" to coaching); the log path also falls back to the last exercise if extraction returns no name
 - `scripts/migrate_v09.py` (dry run by default, `--apply` to write; idempotent): merged duplicate exercises, split mis-merged sets by raw name, backfilled muscle groups. Applied to the live DB 2026-10-11 (backup in `backups/`, gitignored)
 
 ### v0.8 additions

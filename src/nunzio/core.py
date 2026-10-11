@@ -97,6 +97,13 @@ class MessageHandler:
         # "today") in this message resolve in the zone they're currently in.
         async with db_manager.get_session() as session:
             user_tz = await user_settings_repo.get_timezone(session, user_id)
+            # A bare set ("10x45", "12@55 lb, felt heavy") means "same exercise as last
+            # time". Name it up front so classification and extraction can't misroute it.
+            if self._is_bare_set(message):
+                latest = await workout_set_repo.get_latest_batch_for_user(session, user_id)
+                if latest:
+                    newest = max(latest, key=lambda ws: ws.id)
+                    message = f"{newest.exercise.name} {message.strip()}"
 
         intent = await self._llm.classify_intent(message, user_tz)
 
@@ -685,6 +692,15 @@ class MessageHandler:
         set_word = "set" if n == 1 else "sets"
         header = f"Edited {n} {set_word} in #{batch_id}:"
         return "\n".join([header] + change_lines)
+
+    @staticmethod
+    def _is_bare_set(message: str) -> bool:
+        """True for a set with no exercise name: "12@55", "10x45 lb", "2x12@55, easy"."""
+        return bool(re.fullmatch(
+            r"\s*(?:\d+\s*x\s*)?\d+\s*[x@]\s*\d+(?:\.\d+)?\s*(?:lbs?|kg)?\s*(?:[,;:-].*)?",
+            message,
+            re.IGNORECASE | re.DOTALL,
+        ))
 
     @staticmethod
     def _is_unnamed_exercise(name: str | None) -> bool:

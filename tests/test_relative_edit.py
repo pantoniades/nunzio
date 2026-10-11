@@ -31,3 +31,11 @@ def test_absolute_edit_is_not_relative():
     assert parse("change weight to 30") == {}
     assert parse("reps to 12") == {}
     assert parse("fix #42 set 3 to 200 lbs") == {}
+
+
+def test_bare_set_detection():
+    bare = MessageHandler._is_bare_set
+    for msg in ["12@55", "12@55 lb", "10x45", "12 @ 25 kg", "2x12@55", "8@60, felt heavy"]:
+        assert bare(msg), msg
+    for msg in ["low row 12@55", "again 12@55", "12", "weight 179.8", "5lb more", "delete #42"]:
+        assert not bare(msg), msg
