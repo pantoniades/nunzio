@@ -124,6 +124,9 @@ def main() -> None:
         level=config.logging.level,
         format=config.logging.format,
     )
+    # httpx logs every request URL at INFO, and Telegram puts the bot token in
+    # the URL, so polling would write the token to the journal every 10s.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     bot = NunzioBot()
     bot.run()
 
