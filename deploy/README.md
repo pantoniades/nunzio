@@ -97,9 +97,8 @@ git push origin master
 cd ~/Deploy/nunzio
 git pull --ff-only
 
-# 3. Rebuild the image (--format docker is required for HEALTHCHECK), then drop
-#    the dangling old image + builder stage the rebuild leaves behind.
-podman build --format docker -t localhost/nunzio:latest . && podman image prune -f
+# 3. Rebuild the image (--format docker is required for HEALTHCHECK).
+podman build --format docker -t localhost/nunzio:latest .
 
 # 4. Run any new DB migration (see "migrations" note below).
 venv/bin/python scripts/migrate_v08.py    # schema; idempotent, safe to re-run
@@ -108,8 +107,10 @@ venv/bin/python scripts/migrate_v08.py    # schema; idempotent, safe to re-run
 #    MYSQL_PWD=... mysqldump -h odysseus -u nunzio --single-transaction --no-tablespaces \
 #      nunzio_workouts exercises workout_sets > backups/pre_<change>_$(date +%Y%m%d).sql
 
-# 5. Restart the service onto the new image.
-systemctl --user restart nunzio
+# 5. Restart the service onto the new image, then drop the dangling old image +
+#    builder stage the rebuild left behind. Prune only after the restart: until
+#    then the old container still holds the old image, so prune can't remove it.
+systemctl --user restart nunzio && podman image prune -f
 systemctl --user status nunzio            # confirm active + healthy
 journalctl --user -u nunzio -n 30         # confirm "Application started"
 ```
