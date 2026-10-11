@@ -10,17 +10,15 @@ Two interfaces: interactive CLI for local use, Telegram bot for mobile (at the g
 - Cardio logging with duration and distance ("ran 3 miles in 25 minutes")
 - Undo/delete workouts ("undo", "delete last", "delete #42")
 - Repeat last workout ("again", "repeat last")
-- Smart exercise matching — word-overlap scoring replaces naive substring search. Unknown exercises get created as-is instead of being force-mapped to the wrong catalog entry. Matched names show the mapping ("Dumbbell Flyes (from 'dumbbell fly')")
-- Context-aware coaching based on your actual workout history, volume trends, consistency, body-weight trend, exercise guidance, and training principles
+- Context-aware coaching based on your actual workout history, volume trends, consistency, body-weight trend, exercise guidance, and training principles (work in progress)
 - Per-user timezone, settable in chat ("set my timezone to Tokyo", "I'm in London now") — relative dates like "yesterday" resolve in your current zone
 - Intent classification with exercise and muscle group extraction in a single LLM call
 - Exercise catalog with 29 exercises across 9 muscle groups (including cardio)
 - Training principles (progression, deload, rep ranges, volume, etc.) injected into coaching prompts
-- Workout statistics and progress tracking
+- Workout statistics and progress tracking - say "stats" for most recent
 - Message logging — every interaction saved with intent, confidence, and response for debugging
 - Telegram bot via long-polling — no port forwarding or dynamic DNS needed
 - Podman container for deployment
-- Local LLM integration via Ollama + Instructor (JSON mode) for structured extraction
 - Multi-user support — each Telegram user's data is isolated (CLI uses a separate user ID)
 - Complete privacy — everything runs locally
 

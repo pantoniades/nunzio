@@ -65,7 +65,7 @@ This context block is injected into the user message alongside a coaching system
 
 **Proactive check-ins** — `checkin.py` runs as an in-process PTB JobQueue job (hourly, wired in `bot.py` `_post_init`). For each recipient whose local time is `CHECKIN_HOUR`, `compute_checkin()` picks the top-priority trigger (fresh PR > streak milestone > inactivity nudge with a suggested lagging-group focus) and sends one message via `bot.send_message`, deduped through the `proactive_log` table. Recipients come from `TELEGRAM__ALLOWED_USER_IDS` (or all logged users if unrestricted, never `user_id=0`). Requires the `python-telegram-bot[job-queue]` extra.
 
-**Log comments (hybrid)** — After a log, `_generate_log_comment()` heuristic decides if anything's notable (PR/first-time/gap/weight-up/pain). If so, it's upgraded to an LLM-written, numbers-grounded one-liner via `LLMClient.generate_log_comment()`; on any failure it falls back to the heuristic string.
+**Log comments (hybrid)** — After a log, `_generate_log_comment()` heuristic decides if anything's notable (PR/first-time/gap/weight-up/pain). If so, it's upgraded to an LLM-written, numbers-grounded one-liner via `LLMClient.generate_log_comment()`; on any failure it falls back to the heuristic string. **Tone guardrail (v0.8.1):** the comment/coaching prompts are supportive, not harsh — a load below the last session is treated as a warm-up / back-off / easing-in, never a "step down" or "setback" to scold, and increases are offered, not demanded. `_log_comment_summary()` emits an explicit `NOTE:` line whenever the just-logged top weight is below the last session so the model doesn't misread a warm-up as a regression.
 
 ## Infrastructure
 

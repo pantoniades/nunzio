@@ -485,6 +485,29 @@ class MessageHandler:
             lines.append("PRIOR HISTORY:")
             lines.extend(prior_lines)
 
+        # Flag lighter-than-last loads so the coach reads them as a warm-up / back-off /
+        # easing-in set, not a regression to scold. A lower number is legitimate.
+        lighter: list[str] = []
+        for ex in order:
+            if ex["is_cardio"]:
+                continue
+            ex_sets = [s for s in logged_sets if s["exercise_id"] == ex["exercise_id"]]
+            weights = [s["weight"] for s in ex_sets if s["weight"]]
+            ex_hist = [
+                h for h in hist_by_ex.get(ex["exercise_id"], []) if h.weight is not None
+            ]
+            if not weights or not ex_hist:
+                continue
+            if max(weights) < ex_hist[0].weight:
+                lighter.append(ex["name"])
+        if lighter:
+            lines.append(
+                "NOTE: lighter than the last session for "
+                + ", ".join(lighter)
+                + " — treat as a warm-up / back-off / easing in, NOT a regression. "
+                "Do not scold or demand more weight."
+            )
+
         lines.append(f"SIGNAL: {heuristic}")
         return "\n".join(lines)
 
