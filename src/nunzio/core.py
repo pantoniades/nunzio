@@ -16,6 +16,7 @@ from .database.repository import (
     user_settings_repo,
     workout_set_repo,
 )
+from .exercise_names import guess_muscle_group
 from .llm.client import LLMClient
 from .llm.context import build_coaching_context
 from .stats import compute_consistency
@@ -219,9 +220,25 @@ class MessageHandler:
             logged: list[str] = []
             logged_set_data: list[dict] = []
             history: list = []
+            last_exercise_name: str | None = None
             for set_idx, ex_set in enumerate(workout_data.exercises):
                 raw_name = ex_set.exercise_name
                 matched_differently = False
+
+                # 0. No exercise named ("12@55") — continue with the last one logged.
+                if self._is_unnamed_exercise(raw_name):
+                    if last_exercise_name is None:
+                        latest = await workout_set_repo.get_latest_batch_for_user(
+                            session, user_id
+                        )
+                        if latest:
+                            newest = max(latest, key=lambda ws: ws.id)
+                            last_exercise_name = newest.exercise.name
+                    if last_exercise_name is None:
+                        return (
+                            "Which exercise was that? Try e.g. 'low row 12@55'."
+                        )
+                    raw_name = last_exercise_name
 
                 # 1. Exact name match
                 exercise = await exercise_repo.get_by_name(session, raw_name)
@@ -238,10 +255,11 @@ class MessageHandler:
                             session,
                             obj_in={
                                 "name": raw_name,
-                                "muscle_group": "general",
+                                "muscle_group": guess_muscle_group(raw_name),
                             },
                         )
 
+                last_exercise_name = exercise.name
                 unit = ex_set.unit if ex_set.unit != "bodyweight" else "lbs"
                 await workout_set_repo.create(
                     session,
@@ -586,6 +604,12 @@ class MessageHandler:
             if val is not None:
                 updates[dst] = val
 
+        # "5lb more" / "2 fewer reps" are deltas on the existing value. The extractor
+        # reads them as absolute ("weight to 5"), so parse them here and override.
+        deltas = self._parse_relative_edit(message)
+        for field in deltas:
+            updates.pop(field, None)
+
         async with db_manager.get_session() as session:
             # Resolve target sets
             target_sets = []
@@ -601,9 +625,9 @@ class MessageHandler:
                 # Resolve exercise name
                 exercise = await exercise_repo.get_by_name(session, data.exercise_name)
                 if not exercise:
-                    scored = await exercise_repo.search_scored(session, data.exercise_name)
-                    if scored and scored[0][1] >= 0.3:
-                        exercise = scored[0][0]
+                    exercise = await self._match_logged_exercise(
+                        session, data.exercise_name, user_id
+                    )
                 if not exercise:
                     return f"Exercise '{data.exercise_name}' not found."
                 target_sets = await workout_set_repo.get_latest_sets_for_exercise(
@@ -620,7 +644,7 @@ class MessageHandler:
 
             # No value given (e.g. a bare "edit") — echo the target we'd change and
             # ask for the new value instead of dead-ending.
-            if not updates:
+            if not updates and not deltas:
                 return (
                     f"Editing {self._describe_edit_target(target_sets)} — what should I change? "
                     f"Say e.g. 'reps to 12', 'weight to 185', or 'notes to felt easy'."
@@ -634,7 +658,14 @@ class MessageHandler:
                 befores: list[str] = []
                 afters: list[str] = []
 
-                for field, new_val in updates.items():
+                set_updates = dict(updates)
+                for field, delta in deltas.items():
+                    old_val = getattr(ws, field)
+                    if old_val is not None:
+                        new_val = old_val + delta
+                        set_updates[field] = int(new_val) if field == "reps" else float(new_val)
+
+                for field, new_val in set_updates.items():
                     old_val = getattr(ws, field)
                     if field in ("weight", "reps"):
                         old_display = f"{old_val:g}" if isinstance(old_val, float) else str(old_val) if old_val is not None else "none"
@@ -654,6 +685,50 @@ class MessageHandler:
         set_word = "set" if n == 1 else "sets"
         header = f"Edited {n} {set_word} in #{batch_id}:"
         return "\n".join([header] + change_lines)
+
+    @staticmethod
+    def _is_unnamed_exercise(name: str | None) -> bool:
+        """True when the extractor had no exercise to name (bare "12@55")."""
+        n = (name or "").strip().lower()
+        return n in {"", "unknown", "unknown exercise", "exercise", "n/a", "none", "unspecified"}
+
+    @staticmethod
+    def _parse_relative_edit(message: str) -> dict:
+        """Relative changes in an edit message: {"weight": +5.0, "reps": -2}.
+
+        Handles "5lb more", "5 lbs heavier", "add 5", "+5", "minus 10 lb",
+        "2 more reps", "2 fewer reps". Absolute edits ("weight to 30") return {}.
+        """
+        deltas: dict[str, float] = {}
+        msg = message.lower()
+        num = r"(\d+(?:\.\d+)?)"
+
+        m = re.search(r"\b" + num + r"\s+(more|fewer|less)\s+reps?\b", msg)
+        if m:
+            sign = 1 if m.group(2) == "more" else -1
+            deltas["reps"] = sign * int(float(m.group(1)))
+            msg = msg[:m.start()] + msg[m.end():]
+
+        m = re.search(
+            r"\b" + num + r"\s*(?:lbs?|kg)?\s*(more|heavier|less|lighter)\b", msg
+        )
+        if m:
+            sign = 1 if m.group(2) in ("more", "heavier") else -1
+            deltas["weight"] = sign * float(m.group(1))
+        else:
+            m = re.search(
+                r"(?:\b(add|plus|up|increase(?:\s+by)?|minus|down|subtract|drop|"
+                r"decrease(?:\s+by)?)\s+|(?<![\w.])([+-]))\s*" + num
+                + r"\s*(?:lbs?|kg)?(?!\s*reps?\b)",
+                msg,
+            )
+            if m:
+                word = m.group(1) or ""
+                negative = m.group(2) == "-" or word.split()[0:1] in (
+                    ["minus"], ["down"], ["subtract"], ["drop"], ["decrease"]
+                )
+                deltas["weight"] = (-1 if negative else 1) * float(m.group(3))
+        return deltas
 
     @staticmethod
     def _parse_repeat_modifiers(message: str) -> dict:
@@ -1012,6 +1087,22 @@ class MessageHandler:
 
             return "\n".join(lines)
 
+    @staticmethod
+    async def _match_logged_exercise(session, name: str, user_id: int):
+        """Best scored match (>= 0.5), preferring exercises this user has logged.
+
+        Looking up history or editing only makes sense for something they've done,
+        so a weak overlap ("shoulder press" vs "Bench Press") must not win.
+        """
+        scored = await exercise_repo.search_scored(session, name)
+        logged_ids = await workout_set_repo.get_exercise_ids_for_user(session, user_id)
+        for ex, score in scored:
+            if score < 0.5:
+                break
+            if ex.id in logged_ids:
+                return ex
+        return scored[0][0] if scored and scored[0][1] >= 0.5 else None
+
     async def _handle_exercise_history(self, intent, user_id: int) -> str:
         """Show history for a specific exercise."""
         async with db_manager.get_session() as session:
@@ -1020,9 +1111,7 @@ class MessageHandler:
             for name in getattr(intent, "mentioned_exercises", []):
                 exercise = await exercise_repo.get_by_name(session, name)
                 if not exercise:
-                    scored = await exercise_repo.search_scored(session, name)
-                    if scored and scored[0][1] >= 0.3:
-                        exercise = scored[0][0]
+                    exercise = await self._match_logged_exercise(session, name, user_id)
                 if exercise:
                     break
 

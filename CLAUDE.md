@@ -30,13 +30,19 @@ What works:
 - Body weight tracking: "weighed 191.4 lb" — routed via `log_weight` intent, persisted in `body_weight` table, weigh-in trends shown on log
 - Repeat last workout: "again", "repeat last" — clones most recent batch via `repeat_last` intent. Inline override syntax (regex-parsed, no LLM call): "again 10x55" / "again 12@30" / "Another, 10x50 kg" override reps and weight; "again 2x12@55", "2 more sets @20 lb", "one more set" log N sets of the most recent set (not a clone of the whole batch); "twice"/"x2" repeats the whole batch
 - Resident-model reuse: when llama-swap has a model from the JSON-mode allowlist (`qwen3.5-27b`, `qwen3-coder-30b`, `gemma-4-27b`) already loaded, Nunzio uses it to skip swap latency. Other resident models force a swap back to the configured default. Override is shown in the response footer and logged at INFO on transitions.
-- Scored exercise matching: word-overlap Jaccard replaces ILIKE `%query%`. Exact match → use it, score ≥ 0.5 → use it (show mapping), score < 0.5 → create ad-hoc exercise with user's exact name
+- Scored exercise matching (`exercise_names.py`): Jaccard over normalized tokens (plurals, hyphens, synonyms like pec/pectoral→chest, flyes→fly folded). An equipment/angle mismatch (dumbbell/barbell/machine/cable/band/incline/decline…) halves the score, so "dumbbell bench press" ≠ "Bench Press". Exact match → use it, score ≥ 0.5 → use it (show mapping), score < 0.5 → create ad-hoc exercise with the user's exact name and a muscle group from `guess_muscle_group()` (keyword rules; was always "general"). History/edit lookups use the same 0.5 bar, preferring exercises the user has logged. Different machines for the same movement (Life Fitness vs. cable pulldown) are deliberately kept as separate exercises — their loads aren't comparable; they share a muscle group for volume
 - Raw exercise name preserved: `workout_sets.raw_exercise_name` stores what the user actually said. Response shows mapping when names differ (e.g. `Dumbbell Flyes (from "dumbbell fly")`)
 - Set-level notes pass through from LLM extraction to DB
 - Notes extraction: LLM prompt extracts subjective observations and equipment modifiers into `notes` field, keeping exercise names clean
 - Sensible defaults: missing reps default to 10 for strength sets (shown as "assumed" in response)
 - Coaching context includes set notes (pain, effort, equipment) in history lines
 - Message logging: every message logged to `message_log` table with intent, confidence, and response summary (v0.8: `extracted_data` now stores the classified intent JSON)
+
+### v0.9 additions
+- Coaching gets a YOUR EXERCISES block (every exercise from the last 90 days with its last session's sets); the prompt prescribes only from that roster, stays at or below the last working weight after a gap, and never emits textbook loads or `[placeholder]` weights
+- Relative edits: "5lb more", "2 fewer reps", "add 5" are parsed in code (`_parse_relative_edit`) and applied as deltas — the extractor reads them as absolute values
+- A bare "12@55" (no exercise named) continues the last logged exercise instead of creating "Unknown Exercise"
+- `scripts/migrate_v09.py` (dry run by default, `--apply` to write; idempotent): merged duplicate exercises, split mis-merged sets by raw name, backfilled muscle groups. Applied to the live DB 2026-10-11 (backup in `backups/`, gitignored)
 
 ### v0.8 additions
 - Default model switched to `gemma-4-27b` (was `qwen3.5-27b`); `edit_set` extraction routed through Instructor `Mode.TOOLS` because gemma returns all-null on the all-optional `EditSetData` schema under JSON mode

@@ -7,6 +7,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ..exercise_names import score_match
 from .models import (
     Base,
     BodyWeight,
@@ -137,17 +138,8 @@ class ExerciseRepository(BaseRepository[Exercise, dict, dict]):
 
     @staticmethod
     def score_match(query: str, name: str) -> float:
-        """Score exercise name match using word-overlap Jaccard similarity.
-
-        Tokenizes both strings, computes |intersection| / |union|.
-        """
-        q_tokens = set(query.lower().split())
-        n_tokens = set(name.lower().split())
-        if not q_tokens or not n_tokens:
-            return 0.0
-        intersection = q_tokens & n_tokens
-        union = q_tokens | n_tokens
-        return len(intersection) / len(union)
+        """Score exercise name match (normalized-token Jaccard, variant-aware)."""
+        return score_match(query, name)
 
     async def search_scored(
         self, session: AsyncSession, query: str
@@ -438,6 +430,14 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
         """)
         result = await session.execute(stmt, {"uid": user_id, "days": days})
         return [row[0] for row in result.fetchall()]
+
+    async def get_exercise_ids_for_user(
+        self, session: AsyncSession, user_id: int
+    ) -> set[int]:
+        """Ids of every exercise the user has logged at least one set of."""
+        stmt = select(WorkoutSet.exercise_id).where(WorkoutSet.user_id == user_id).distinct()
+        result = await session.execute(stmt)
+        return {row[0] for row in result.fetchall()}
 
     async def get_distinct_user_ids(self, session: AsyncSession) -> List[int]:
         """All distinct user_ids that have logged sets (for proactive check-ins)."""

@@ -99,3 +99,18 @@ async def test_again_sets_reps_at_weight(handler: MessageHandler):
 
     await handler.process("undo", user_id=55557)
     await handler.process("undo", user_id=55557)
+
+
+@pytest.mark.asyncio
+async def test_bare_reps_at_weight_uses_last_exercise(handler: MessageHandler):
+    """The Oct 9 case: a bare '12@55' logged 'Unknown Exercise'."""
+    response = await handler.process("low row 12@40", user_id=55557)
+    assert "Low Row" in response
+
+    response = await handler.process("12@55", user_id=55557)
+    assert "Logged" in response
+    assert "Low Row" in response
+    assert "Unknown" not in response
+
+    await handler.process("undo", user_id=55557)
+    await handler.process("undo", user_id=55557)

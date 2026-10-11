@@ -106,3 +106,17 @@ async def test_edit_wrong_user(handler: MessageHandler):
 
     # Clean up
     await handler.process(f"delete #{batch_id}", user_id=60006)
+
+
+@pytest.mark.asyncio
+async def test_edit_relative_weight(handler: MessageHandler):
+    """The Jul 30 case: '5lb more' must add 5 (25 → 30), not set the weight to 5."""
+    response = await handler.process("face pull 12@25", user_id=60001)
+    assert "Logged" in response
+    batch_id = _extract_batch_id(response)
+
+    response = await handler.process("5lb more", user_id=60001)
+    assert "Edited" in response
+    assert "25 → 30" in response
+
+    await handler.process(f"delete #{batch_id}", user_id=60001)
