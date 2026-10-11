@@ -657,40 +657,70 @@ class MessageHandler:
 
     @staticmethod
     def _parse_repeat_modifiers(message: str) -> dict:
-        """Parse weight overrides and repetition count from a repeat message.
+        """Parse overrides and counts from a repeat message.
 
-        Returns dict with keys: reps, weight, weight_unit, times, note.
+        Returns dict with keys: reps, weight, weight_unit, times, sets, note.
+        ``times`` repeats the whole last batch; ``sets`` (when not None) instead logs
+        that many sets of the last exercise ("one more set", "2 more sets", "2x12@55").
         """
-        # Strip trigger words first
-        stripped = re.sub(
-            r"\b(same as last time|repeat last|same thing|another set|another|one more set|one more|again|repeat)\b",
-            "",
-            message,
-            flags=re.IGNORECASE,
-        ).strip(" ,.-;:")
+        unit_re = r"\s*(lbs?|kg)?\b"
+        num_words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+
+        def _unit(u: str | None) -> str:
+            return "kg" if u and u.lower().startswith("k") else "lbs"
 
         reps = None
         weight = None
         weight_unit = None
         times = 1
-        note = stripped
+        sets = None
+        note = message
 
-        # Reps × weight shorthand: "10x55", "8 x 100 kg", "10x50 lbs"
-        reps_weight_match = re.search(
-            r"\b(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(lbs?|kg)?\b",
+        # Set counts: "one more set", "2 more sets", "another set"
+        sets_match = re.search(
+            r"\b(one|two|three|four|five|\d+)\s+more\s+sets?\b|\banother\s+set\b",
             note,
             re.IGNORECASE,
         )
-        if reps_weight_match:
-            reps = int(reps_weight_match.group(1))
-            weight = float(reps_weight_match.group(2))
-            u = reps_weight_match.group(3)
-            weight_unit = "kg" if u and u.lower().startswith("k") else "lbs"
-            note = note[:reps_weight_match.start()] + note[reps_weight_match.end():]
+        if sets_match:
+            n = (sets_match.group(1) or "1").lower()
+            sets = num_words.get(n) or int(n)
+            note = note[:sets_match.start()] + note[sets_match.end():]
+
+        # Strip trigger words and filler
+        note = re.sub(
+            r"\b(same as last time|repeat last|same thing|another|one more|again|repeat)\b",
+            "",
+            note,
+            flags=re.IGNORECASE,
+        ).strip(" ,.-;:")
+        # A dangling "more" ("twice more") is filler, not a note.
+        note = re.sub(r"^more\b|\bmore$", "", note, flags=re.IGNORECASE).strip(" ,.-;:")
+
+        # Sets x reps @ weight: "2x12@55", "3 x 10 @ 20 kg"
+        m = re.search(
+            r"\b(\d+)\s*x\s*(\d+)\s*@\s*(\d+(?:\.\d+)?)" + unit_re, note, re.IGNORECASE
+        )
+        if m:
+            sets = int(m.group(1))
+            reps = int(m.group(2))
+            weight = float(m.group(3))
+            weight_unit = _unit(m.group(4))
+        else:
+            # Reps @ weight: "12@30", "10 @ 20 kg"; then reps x weight: "10x55"
+            m = re.search(
+                r"\b(\d+)\s*[@x]\s*(\d+(?:\.\d+)?)" + unit_re, note, re.IGNORECASE
+            )
+            if m:
+                reps = int(m.group(1))
+                weight = float(m.group(2))
+                weight_unit = _unit(m.group(3))
+        if m:
+            note = note[:m.start()] + note[m.end():]
         else:
             # Weight override: "at 35 lb", "for 35 lbs", "@ 40", "35 lb", "35 kg"
             weight_match = re.search(
-                r"(?:at|for|@)\s*(\d+(?:\.\d+)?)\s*(lbs?|kg)?\b"
+                r"(?:\bat|\bfor|@)\s*(\d+(?:\.\d+)?)\s*(lbs?|kg)?\b"
                 r"|(\d+(?:\.\d+)?)\s*(lbs?|kg)\b",
                 note,
                 re.IGNORECASE,
@@ -699,7 +729,7 @@ class MessageHandler:
                 w = weight_match.group(1) or weight_match.group(3)
                 u = weight_match.group(2) or weight_match.group(4)
                 weight = float(w)
-                weight_unit = "kg" if u and u.lower().startswith("k") else "lbs"
+                weight_unit = _unit(u)
                 note = note[:weight_match.start()] + note[weight_match.end():]
             elif re.fullmatch(r"\d+(?:\.\d+)?", note):
                 # Bare number with no unit: "again 54" → 54 lbs
@@ -723,7 +753,14 @@ class MessageHandler:
 
         note = (note or "").strip(" ,.-;:") or None
 
-        return {"reps": reps, "weight": weight, "weight_unit": weight_unit, "times": times, "note": note}
+        return {
+            "reps": reps,
+            "weight": weight,
+            "weight_unit": weight_unit,
+            "times": times,
+            "sets": sets,
+            "note": note,
+        }
 
     async def _handle_repeat_last(
         self, message: str, user_id: int, user_tz: str = "America/New_York"
@@ -739,12 +776,19 @@ class MessageHandler:
             old_batch_id = last_sets[0].batch_id
             now = now_in_tz(user_tz)
             sorted_sets = sorted(last_sets, key=lambda s: (s.exercise_id, s.set_number))
+            if mods["sets"]:
+                # "one more set" / "2x12@55": N sets of the most recently logged set,
+                # not a clone of the whole batch.
+                template = max(last_sets, key=lambda s: s.id)
+                sorted_sets = [template] * mods["sets"]
 
             logged: list[str] = []
             for _rep in range(mods["times"]):
                 new_batch_id = await workout_set_repo.get_next_batch_id(session, user_id)
 
-                for old_set in sorted_sets:
+                for set_number, old_set in enumerate(sorted_sets, start=1):
+                    if not mods["sets"]:
+                        set_number = old_set.set_number
                     use_weight = mods["weight"] if mods["weight"] is not None else old_set.weight
                     use_unit = mods["weight_unit"] if mods["weight_unit"] is not None else old_set.weight_unit
                     use_reps = mods["reps"] if mods["reps"] is not None else old_set.reps
@@ -756,7 +800,7 @@ class MessageHandler:
                             "batch_id": new_batch_id,
                             "set_date": now,
                             "exercise_id": old_set.exercise_id,
-                            "set_number": old_set.set_number,
+                            "set_number": set_number,
                             "reps": use_reps,
                             "weight": use_weight,
                             "weight_unit": use_unit,
@@ -774,7 +818,7 @@ class MessageHandler:
                         line = f"  {name}: {', '.join(parts)}"
                     else:
                         weight_str = f"{use_weight} {use_unit}" if use_weight else "bodyweight"
-                        line = f"  {name}: set {old_set.set_number} - {use_reps} reps @ {weight_str}"
+                        line = f"  {name}: set {set_number} - {use_reps} reps @ {weight_str}"
                     if mods["note"]:
                         line += f" — note: {mods['note']}"
                     logged.append(line)

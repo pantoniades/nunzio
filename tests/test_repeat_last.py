@@ -69,3 +69,33 @@ async def test_repeat_twice(handler: MessageHandler):
     await handler.process("undo", user_id=55558)
     await handler.process("undo", user_id=55558)
     await handler.process("undo", user_id=55558)
+
+
+@pytest.mark.asyncio
+async def test_one_more_set_after_multi_set_batch(handler: MessageHandler):
+    """'One more set' after a 2-set log adds exactly one set, not a clone of both."""
+    response = await handler.process("low row 2x12@55", user_id=55557)
+    assert "Logged" in response
+
+    response = await handler.process("one more set", user_id=55557)
+    assert "Repeated" in response
+    assert "set 1 - 12 reps @ 55" in response
+    assert "set 2" not in response
+
+    await handler.process("undo", user_id=55557)
+    await handler.process("undo", user_id=55557)
+
+
+@pytest.mark.asyncio
+async def test_again_sets_reps_at_weight(handler: MessageHandler):
+    """'Again 2x12@55' logs two sets of 12 at 55, not 2 reps at 12."""
+    response = await handler.process("lat pulldown 12@45", user_id=55557)
+    assert "Logged" in response
+
+    response = await handler.process("again 2x12@55", user_id=55557)
+    assert "set 1 - 12 reps @ 55" in response
+    assert "set 2 - 12 reps @ 55" in response
+    assert "note" not in response
+
+    await handler.process("undo", user_id=55557)
+    await handler.process("undo", user_id=55557)

@@ -68,3 +68,26 @@ def test_rank_lagging_groups_all_untrained():
     ranked, untrained = rank_lagging_groups({})
     assert ranked == []
     assert "chest" in untrained
+
+
+def test_no_nudge_day_after_previous_nudge():
+    """Nudges never fire on consecutive days."""
+    yesterday = date(2026, 7, 12)
+    assert consistency_trigger(
+        _stats(days_since_last=8, avg_gap=3.0), TODAY, None, last_nudge=yesterday
+    ) is None
+
+
+def test_nudge_every_other_day():
+    two_days_ago = date(2026, 7, 11)
+    kind, _ref, _msg = consistency_trigger(
+        _stats(days_since_last=8, avg_gap=3.0), TODAY, None, last_nudge=two_days_ago
+    )
+    assert kind == "nudge"
+
+
+def test_streak_not_blocked_by_recent_nudge():
+    kind, _ref, _msg = consistency_trigger(
+        _stats(streak=3), TODAY, None, last_nudge=TODAY
+    )
+    assert kind == "streak"

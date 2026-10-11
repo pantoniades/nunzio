@@ -534,6 +534,18 @@ class ProactiveLogRepository(BaseRepository[ProactiveLog, dict, dict]):
         result = await session.execute(stmt)
         return result.scalar_one_or_none() is not None
 
+    async def last_sent_at(
+        self, session: AsyncSession, user_id: int, kind: str
+    ) -> datetime | None:
+        """When a check-in of this kind was last sent to the user, or None."""
+        stmt = (
+            select(func.max(ProactiveLog.sent_at))
+            .where(ProactiveLog.user_id == user_id)
+            .where(ProactiveLog.kind == kind)
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
 
 class UserSettingsRepository(BaseRepository[UserSettings, dict, dict]):
     """Repository for per-user settings (timezone, etc.)."""
