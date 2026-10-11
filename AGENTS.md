@@ -35,8 +35,9 @@ python scripts/migrate_v09.py      # v0.9: exercise cleanup — dry run; --apply
 ## Workflow
 
 - Single developer: commit directly to `master` and push. No feature branches or PRs.
-- Deploy: pull into `~/Deploy/nunzio`, `podman build --format docker -t localhost/nunzio:latest .`,
-  then `systemctl --user restart nunzio` (see `deploy/README.md`).
+- Deploy: pull into `~/Deploy/nunzio`, `podman build --format docker -t localhost/nunzio:latest . && podman image prune -f`,
+  then `systemctl --user restart nunzio` (see `deploy/README.md`). The prune removes the untagged
+  old image and builder stage that every rebuild leaves behind.
 
 ## Project Structure
 

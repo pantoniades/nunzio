@@ -14,11 +14,13 @@ the service (not root).
 ### 1. Build the image
 
 ```bash
-podman build --format docker -t localhost/nunzio:latest .
+podman build --format docker -t localhost/nunzio:latest . && podman image prune -f
 ```
 
 `--format docker` is required for the image's `HEALTHCHECK` to be honored
-(podman's default OCI format silently ignores it).
+(podman's default OCI format silently ignores it). The prune removes the previous
+image (untagged when `:latest` moves) and the multi-stage builder layer; without it
+every rebuild leaves ~600MB of dangling `<none>` images.
 
 ### 2. Prepare config
 
@@ -95,8 +97,9 @@ git push origin master
 cd ~/Deploy/nunzio
 git pull --ff-only
 
-# 3. Rebuild the image (--format docker is required for HEALTHCHECK).
-podman build --format docker -t localhost/nunzio:latest .
+# 3. Rebuild the image (--format docker is required for HEALTHCHECK), then drop
+#    the dangling old image + builder stage the rebuild leaves behind.
+podman build --format docker -t localhost/nunzio:latest . && podman image prune -f
 
 # 4. Run any new DB migration (see "migrations" note below).
 venv/bin/python scripts/migrate_v08.py    # schema; idempotent, safe to re-run
