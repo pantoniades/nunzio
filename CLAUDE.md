@@ -168,3 +168,7 @@ This context block is injected into the user message alongside a coaching system
   from reviewing Jul–Oct usage.
 - Conversation context / multi-turn workout logging
 - Proper test coverage with mocked LLM/DB (current tests hit real services)
+- **Record the model per message.** Add a `model` column to `message_log` (migration
+  script) holding the model that actually answered — the configured default or the
+  resident override. Today it's only knowable from the journal's transition-only
+  `Active model:` / `Using resident model` lines.
