@@ -16,6 +16,12 @@ class DatabaseConfig(BaseModel):
     pool_size: int = Field(default=5, description="Connection pool size")
     max_overflow: int = Field(default=10, description="Max overflow connections")
     pool_timeout: int = Field(default=30, description="Pool timeout in seconds")
+    pool_recycle: int = Field(
+        default=3600, description="Recycle pooled connections older than this (seconds)"
+    )
+    echo: bool = Field(
+        default=False, description="Log every SQL statement (very noisy; debugging only)"
+    )
 
 
 class LLMConfig(BaseModel):

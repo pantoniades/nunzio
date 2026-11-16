@@ -90,6 +90,31 @@ def test_same_variant_still_matches():
     assert score("incline dumbbell bench", "Incline Dumbbell Press") >= 0.5
 
 
+def test_hyphenated_up_movements_fold():
+    """Nov 14 root cause: 'scapular pushups' missed the catalog's 'Scapular Push-Up'."""
+    assert score("scapular pushups", "Scapular Push-Up") == 1.0
+    assert score("scap pushups", "Scapular Push-Up") == 1.0
+    assert score("push ups", "Pushup") == 1.0
+    assert score("pull-ups", "Pull Up") == 1.0
+    assert score("chinups", "Chin-Up") == 1.0
+    assert guess_muscle_group("Scapular Pushups") == "chest"
+
+
+def test_more_specific_query_is_a_different_exercise():
+    """Nov 14: 'scapular pushups' was logged as Pushup four times running."""
+    assert score("scapular pushups", "Pushup") < 0.5
+    assert score("Dumbbell Hammer Curl", "Dumbbell Curl") < 0.5
+    assert score("close grip bench press", "Bench Press") < 0.5
+
+
+def test_abbreviated_or_redundant_query_still_matches():
+    assert score("bench", "Bench Press") >= 0.5
+    assert score("pulldown", "Lat Pulldown") >= 0.5
+    assert score("rope pulldown", "Tricep Rope Pulldown") >= 0.5
+    assert score("incline dumbbell bench press", "Incline Dumbbell Press") >= 0.5
+    assert score("the bench press", "Bench Press") == 1.0
+
+
 def test_guess_muscle_group():
     cases = {
         "Low Row": "back",

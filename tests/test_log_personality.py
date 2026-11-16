@@ -19,6 +19,20 @@ def _ws(exercise_id, weight=None, set_date=None, **kw):
 NOW = datetime(2026, 2, 14, 12, 0)
 
 
+def test_gap_fires_once_per_comeback_not_per_exercise():
+    """Oct 13: every new exercise in one session got a 'good to have you back'."""
+    logged = [{"exercise_id": 1, "name": "Squat", "weight": 225.0, "reps": 5, "notes": None, "is_cardio": False}]
+    history = [_ws(1, weight=225.0, set_date=NOW - timedelta(days=20))]
+    gen = MessageHandler._generate_log_comment
+    # Already logged something an hour ago: this exercise's own 20-day gap is not news.
+    assert gen(logged, history, NOW, last_activity=NOW - timedelta(hours=1)) is None
+    # First log after 6 days away from the gym.
+    assert (
+        gen(logged, history, NOW, last_activity=NOW - timedelta(days=6))
+        == "Back at it after 6 days."
+    )
+
+
 def test_pr_detected():
     logged = [{"exercise_id": 1, "name": "Bench Press", "weight": 200.0, "reps": 5, "notes": None, "is_cardio": False}]
     history = [_ws(1, weight=185.0)]

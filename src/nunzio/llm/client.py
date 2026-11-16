@@ -150,12 +150,13 @@ class LLMClient:
 
         POSSIBLE INTENTS:
         - log_workout: User is reporting a workout they already did (past tense: "I did", "I benched", etc.)
+          A plan or announcement with no numbers ("I'm going to do triceps press now", "next up: squats") is NOT log_workout — use coaching.
         - log_weight: User is reporting their body weight ("weighed 185", "weight is 82 kg", "191.4 lbs", "body weight 180")
         - view_stats: User wants to see their workout history or statistics
         - list_workouts: User wants to see a list of recent workout sessions with IDs ("last workouts", "list workouts", "list sessions", "show sessions")
         - delete_workout: User wants to undo, delete, or remove a logged workout ("undo", "delete last", "remove session #42", "that's wrong")
         - repeat_last: User wants to log the same workout again ("again", "repeat last", "same as last time", "another set", "one more", "one more set", "same thing")
-        - edit_set: User wants to fix, change, or correct a value on an already-logged set ("change reps to 12", "fix weight to 185", "edit last set", "update bench press to 8 reps", "correct #42 set 3 to 200 lbs")
+        - edit_set: User wants to fix, change, or correct a value on an already-logged set ("change reps to 12", "fix weight to 185", "edit last set", "update bench press to 8 reps", "correct #42 set 3 to 200 lbs"), or says the wrong exercise was logged ("these are scapular pushups, not regular ones", "that was incline press, not bench")
         - set_timezone: User wants to set or change their timezone ("set my timezone to London", "I'm in Tokyo now", "switch to Pacific time", "I'm traveling to Berlin", "change timezone to America/Denver"). When this intent applies, also set mentioned_timezone to the IANA zone name (e.g. "Asia/Tokyo", "Europe/London", "America/Los_Angeles").
         - coaching: User wants advice, recommendations, questions about training, or anything else
 
@@ -403,6 +404,12 @@ class LLMClient:
           - "fix weight to 185" → new_weight=185
           - "update to 8 reps at 200 lbs" → new_reps=8, new_weight=200
           - "change notes to felt easy" → new_notes="felt easy"
+        - If the user says the EXERCISE ITSELF was logged wrong, set new_exercise_name to
+          the correct name (and exercise_name to the wrong one, if they name it):
+          - "these are scapular pushups, not regular ones" → new_exercise_name="Scapular Pushups", exercise_name="Pushup"
+          - "that was incline press, not bench press" → new_exercise_name="Incline Press", exercise_name="Bench Press"
+          - "rename the last one to hammer curl" → new_exercise_name="Hammer Curl", is_last=true
+          Leave new_exercise_name null when only reps/weight/notes change.
         - Leave new_* fields as null when the user does NOT mention them.
         - Default weight unit is lbs unless specified otherwise.
         """

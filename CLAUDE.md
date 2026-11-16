@@ -38,6 +38,16 @@ What works:
 - Coaching context includes set notes (pain, effort, equipment) in history lines
 - Message logging: every message logged to `message_log` table with intent, confidence, and response summary (v0.8: `extracted_data` now stores the classified intent JSON)
 
+### v0.9.1 additions (from the Oct 11 – Nov 16 usage + journal review)
+- Matching: "push-up" / "push up" / "pushups" (and pull/chin/sit/step-up) fold to one token, `scap`→`scapular` — "scapular pushups" had lost to "Pushup" because the catalog's "Scapular Push-Up" tokenized differently. A query that adds qualifiers to a short (≤2-token) name is also penalized ("dumbbell hammer curl" ≠ "Dumbbell Curl"); abbreviations ("bench" → "Bench Press") still match
+- `edit_set` can rename a mis-logged exercise: "these are scapular pushups, not regular ones" (`EditSetData.new_exercise_name`); edit responses now say what changed instead of a bare "updated"
+- Exercise history groups by day (one line per gym visit, not per log message) and shows set notes
+- "Back at it after N days" fires once per comeback (days since the user's last log of anything), not once per exercise in the session
+- A bare set with the word "reps" and a trailing note ("2x12 reps heavy blue band") goes to the last exercise
+- A number-free plan ("I'm going to do triceps press now") is routed to coaching instead of being logged as 10 assumed reps (`_is_plan_not_log`)
+- Ops: `pool_pre_ping` + `pool_recycle` (idle MySQL connections were dying: "Lost connection to MySQL server"); SQL echo is its own `DATABASE__ECHO` flag instead of riding on `DEBUG` (the live `.env` has `DEBUG=true`, which wrote ~5k SQL lines/day to the journal); PTB error handler logs transient `NetworkError`s as one WARNING line
+- Apache-2.0 licensed (`LICENSE`)
+
 ### v0.9 additions
 - Coaching gets a YOUR EXERCISES block (every exercise from the last 90 days with its last session's sets); the prompt prescribes only from that roster, stays at or below the last working weight after a gap, and never emits textbook loads or `[placeholder]` weights
 - Relative edits: "5lb more", "2 fewer reps", "add 5" are parsed in code (`_parse_relative_edit`) and applied as deltas — the extractor reads them as absolute values
@@ -160,9 +170,15 @@ This context block is injected into the user message alongside a coaching system
 - ~~Richer stats (PRs, volume trends, per-exercise history)~~ **Done (v0.5).** `view_stats`
   sub-routes by `stats_type`. PRs, exercise history, weekly volume by muscle group,
   consistency metrics (streak, avg gap, 30/90-day counts).
-- **Telegram error handler.** PTB logs "No error handlers are registered" on transient
-  `NetworkError: Bad Gateway` from Telegram. Harmless, but register a handler that logs
-  at WARNING without a traceback.
+- ~~**Telegram error handler.**~~ **Done (v0.9.1).** `NunzioBot._on_error` logs transient
+  `NetworkError`s at WARNING without a traceback; anything else keeps its traceback.
+- **Pause / back off nudges.** "I have an injury that will keep me from the gym till
+  Tuesday" (Nov 6) went to coaching and the every-other-day nudges kept coming (7 in a
+  row, Nov 2–14; the user replied "as I told you"). Needs a pause-until date the user
+  can set in plain language, and probably a cap on consecutive unanswered nudges.
+- **Exercise data cleanup (v0.9.1 follow-up).** The Nov 14 scapular-pushup sets are
+  stored under "Pushup"; "Push-up"/"Pushup" and "Skull Crushers"/"Dumbbell Skull
+  Crusher" are duplicates; "Triceps Press Machine" is an orphan from a deleted mislog.
 - **Review real usage regularly.** `message_log` for the real Telegram user (all other
   user_ids are test fixtures) is the best source of next fixes — v0.9 came entirely
   from reviewing Jul–Oct usage.

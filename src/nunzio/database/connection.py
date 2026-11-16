@@ -33,7 +33,12 @@ class DatabaseManager:
             pool_size=config.database.pool_size,
             max_overflow=config.database.max_overflow,
             pool_timeout=config.database.pool_timeout,
-            echo=config.debug,
+            # The bot idles for hours between messages; MySQL (or anything between)
+            # drops idle connections, and the next query then failed with
+            # "Lost connection to MySQL server". Ping before use and recycle hourly.
+            pool_pre_ping=True,
+            pool_recycle=config.database.pool_recycle,
+            echo=config.database.echo,
         )
 
         self._sessionmaker = async_sessionmaker(

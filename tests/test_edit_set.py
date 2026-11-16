@@ -120,3 +120,41 @@ async def test_edit_relative_weight(handler: MessageHandler):
     assert "25 → 30" in response
 
     await handler.process(f"delete #{batch_id}", user_id=60001)
+
+
+@pytest.mark.asyncio
+async def test_edit_renames_mislogged_exercise(handler: MessageHandler):
+    """Nov 14: 'These are scapular pushups, not regular ones' changed nothing."""
+    response = await handler.process("did 2 sets of pushups 12 reps", user_id=60008)
+    assert "Logged" in response
+    batch_id = _extract_batch_id(response)
+
+    response = await handler.process(
+        "These are scapular pushups, not regular ones", user_id=60008
+    )
+    assert "Edited 2 sets" in response
+    assert "now Scapular Push-Up" in response
+
+    response = await handler.process("scapular pushups history", user_id=60008)
+    assert "Scapular Push-Up" in response
+    assert "2x12" in response
+
+    # Clean up
+    await handler.process(f"delete #{batch_id}", user_id=60008)
+
+
+@pytest.mark.asyncio
+async def test_history_groups_a_day_into_one_session(handler: MessageHandler):
+    """Sets logged in separate messages on one day show as one line, with notes."""
+    r1 = await handler.process("low row 12 reps at 40 lbs, blue handle", user_id=60009)
+    r2 = await handler.process("low row 12 reps at 55 lbs", user_id=60009)
+    assert "Logged" in r1 and "Logged" in r2
+
+    response = await handler.process("low row history", user_id=60009)
+    assert "last 1 session:" in response
+    assert "12x40 / 12x55" in response
+    assert "blue handle" in response
+
+    # Clean up
+    for r in (r2, r1):
+        await handler.process(f"delete #{_extract_batch_id(r)}", user_id=60009)

@@ -13,6 +13,7 @@ _SYNONYMS = {
     "db": "dumbbell",
     "dumbell": "dumbbell",
     "bb": "barbell",
+    "scap": "scapular",
 }
 
 # Tokens that make a different exercise: "dumbbell bench press" is not "bench press",
@@ -23,6 +24,10 @@ _VARIANT_TOKENS = {
 }
 
 _VARIANT_PENALTY = 0.5
+
+# Words that add nothing to an exercise name; ignored when deciding whether the
+# user's name is more specific than a catalog name.
+_FILLER_TOKENS = {"the", "a", "an", "my", "some", "exercise", "workout", "of", "on", "with"}
 
 
 def _singular(t: str) -> str:
@@ -41,6 +46,9 @@ def normalize_tokens(name: str) -> set[str]:
     """Lowercase, split on non-alphanumerics, fold synonyms and plurals."""
     s = (name or "").lower()
     s = re.sub(r"pull[\s-]+down", "pulldown", s)
+    # "Push-Up" / "push up" / "pushups" are one word — split, "scapular pushups" shared
+    # only one token of four with the catalog's "Scapular Push-Up" and lost to "Pushup".
+    s = re.sub(r"\b(push|pull|chin|sit|step)[\s-]+(ups?)\b", r"\1\2", s)
     out = set()
     for t in re.findall(r"[a-z0-9]+", s):
         t = _SYNONYMS.get(t, t)
@@ -50,13 +58,23 @@ def normalize_tokens(name: str) -> set[str]:
 
 
 def score_match(query: str, name: str) -> float:
-    """Jaccard overlap of normalized tokens, penalized when equipment/angle differ."""
-    q = normalize_tokens(query)
-    n = normalize_tokens(name)
+    """Jaccard overlap of normalized tokens, penalized when the names differ in kind.
+
+    Two things halve the score: an equipment/angle mismatch, and a query that adds
+    qualifiers to a short generic name ("scapular pushups" is not "Pushup",
+    "dumbbell hammer curl" is not "Dumbbell Curl" — the Nov 14 and Oct 13 mis-merges).
+    The reverse — an abbreviated query like "bench" for "Bench Press" — is fine.
+    """
+    q = normalize_tokens(query) - _FILLER_TOKENS
+    n = normalize_tokens(name) - _FILLER_TOKENS
     if not q or not n:
         return 0.0
     score = len(q & n) / len(q | n)
-    if (q ^ n) & _VARIANT_TOKENS:
+    # Every word of a short, generic name plus extra qualifiers. Longer names are
+    # exempt: there an extra word is usually redundancy ("incline dumbbell bench
+    # press" for "Incline Dumbbell Press"), not a different movement.
+    more_specific = n < q and len(n) <= 2
+    if (q ^ n) & _VARIANT_TOKENS or more_specific:
         score *= _VARIANT_PENALTY
     return score
 

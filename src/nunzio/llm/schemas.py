@@ -127,6 +127,14 @@ class EditSetData(BaseModel):
         default=False,
         description="True when the user refers to 'last set', 'last workout', or most recent batch.",
     )
+    new_exercise_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Corrected exercise name, ONLY when the user says the logged exercise itself "
+            "is wrong ('these are scapular pushups, not regular ones', 'that was incline "
+            "press, not bench', 'rename it to hammer curl'). Null for value edits."
+        ),
+    )
     new_reps: Optional[int] = Field(
         default=None,
         description="New reps value, only if the user wants to change reps.",

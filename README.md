@@ -278,3 +278,7 @@ pytest tests/test_exercise_matching.py tests/test_repeat_modifiers.py \
        tests/test_relative_edit.py tests/test_roster.py tests/test_checkin.py  # unit (no services)
 pytest tests/                                                              # full suite (needs LLM + MySQL)
 ```
+
+## License
+
+Copyright 2026 Philip Antoniades. Licensed under the [Apache License, Version 2.0](LICENSE).

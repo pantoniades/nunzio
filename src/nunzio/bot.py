@@ -5,6 +5,7 @@ import sys
 from urllib.parse import urlparse
 
 from telegram import Update
+from telegram.error import NetworkError
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from .checkin import run_checkins
@@ -93,6 +94,17 @@ class NunzioBot:
         except Exception:
             logger.exception("Check-in job failed")
 
+    @staticmethod
+    async def _on_error(update: object, context) -> None:
+        """Transient Telegram/network failures (Bad Gateway, DNS blips) are routine
+        for a long-polling bot and PTB retries them — one WARNING line, no traceback.
+        Anything else is a real bug and keeps its traceback."""
+        err = context.error
+        if isinstance(err, NetworkError):
+            logger.warning("Telegram network error (will retry): %s", err)
+        else:
+            logger.error("Unhandled error in Telegram handler", exc_info=err)
+
     async def _post_shutdown(self, app: Application) -> None:
         await self._handler.close()
         logger.info("Nunzio bot shut down")
@@ -112,6 +124,7 @@ class NunzioBot:
 
         app.add_handler(CommandHandler("start", self._on_start))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message))
+        app.add_error_handler(self._on_error)
 
         llm_host = urlparse(config.llm.base_url).netloc
         logger.info("Using %s on %s", config.llm.model, llm_host)

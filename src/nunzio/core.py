@@ -16,7 +16,7 @@ from .database.repository import (
     user_settings_repo,
     workout_set_repo,
 )
-from .exercise_names import guess_muscle_group
+from .exercise_names import guess_muscle_group, score_match
 from .llm.client import LLMClient
 from .llm.context import build_coaching_context
 from .stats import compute_consistency
@@ -107,6 +107,11 @@ class MessageHandler:
 
         intent = await self._llm.classify_intent(message, user_tz)
 
+        # "I'm going to do triceps press now" announces a set; it isn't one. Logged
+        # as-is it became 10 assumed reps @ bodyweight (Nov 14) — coach instead.
+        if intent.intent == "log_workout" and self._is_plan_not_log(message):
+            intent.intent = "coaching"
+
         if intent.intent == "log_workout" and intent.confidence > 0.5:
             # _handle_log_workout extracts the workout data itself (sequentially).
             response = await self._handle_log_workout(message, user_id, user_tz)
@@ -152,6 +157,18 @@ class MessageHandler:
             logger.warning("Message logging failed", exc_info=True)
 
         return response
+
+    @staticmethod
+    def _is_plan_not_log(message: str) -> bool:
+        """True for a number-free statement of intent ("I'm going to do X now")."""
+        if re.search(r"\d", message):
+            return False
+        return bool(re.search(
+            r"\b(going to|gonna|about to|i'?ll|i will|plan(?:ning)? to|next up|up next"
+            r"|want to|wanna|thinking (?:of|about))\b",
+            message.replace("\u2019", "'"),
+            re.IGNORECASE,
+        ))
 
     @staticmethod
     def _swap_if_inverted(ex_set) -> bool:
@@ -218,6 +235,10 @@ class MessageHandler:
                 swapped = True
 
         async with db_manager.get_session() as session:
+            # When the user last logged anything — "back after a gap" is about the
+            # gym visit, not about each exercise in it.
+            previous = await workout_set_repo.get_latest_batch_for_user(session, user_id)
+            last_activity = max((ws.set_date for ws in previous), default=None)
             batch_id = await workout_set_repo.get_next_batch_id(session, user_id)
             if workout_data.date:
                 now = datetime.combine(workout_data.date, now_in_tz(user_tz).time())
@@ -329,7 +350,9 @@ class MessageHandler:
 
         # Heuristic decides whether anything noteworthy happened. If so, upgrade to an
         # LLM-written, data-grounded one-liner; fall back to the heuristic on any failure.
-        comment = self._generate_log_comment(logged_set_data, history, now)
+        comment = self._generate_log_comment(
+            logged_set_data, history, now, last_activity=last_activity
+        )
         if comment:
             summary = self._log_comment_summary(logged_set_data, history, comment)
             llm_comment = await self._llm.generate_log_comment(summary)
@@ -362,13 +385,16 @@ class MessageHandler:
         logged_sets: list[dict],
         history: list,
         now: datetime,
+        *,
+        last_activity: datetime | None = None,
     ) -> str | None:
         """Return a one-line heuristic comment based on what was just logged.
 
         Checks in priority order, returns first match:
         1. New PR (weight exceeds all historical weight for that exercise)
         2. First time logging an exercise
-        3. Back after gap (>3 days since last set for any logged exercise)
+        3. Back after gap (>3 days since the user's last logged set of anything,
+           when `last_activity` is given; else since any logged exercise's last set)
         4. Weight increase (current > most recent historical for same exercise)
         5. Pain in notes
         """
@@ -413,14 +439,21 @@ class MessageHandler:
             if ex["exercise_id"] not in hist_by_ex:
                 return f"First time logging {ex['name']}."
 
-        # 3. Back after gap (>3 days)
-        for ex in exercises:
-            ex_hist = hist_by_ex.get(ex["exercise_id"], [])
-            if ex_hist:
-                most_recent_date = max(ws.set_date for ws in ex_hist)
-                gap_days = (now - most_recent_date).days
-                if gap_days > 3:
-                    return f"Back at it after {gap_days} days."
+        # 3. Back after gap (>3 days). With `last_activity` this fires once, on the
+        # first log of a comeback — judged per exercise it greeted the user with
+        # "good to have you back" on every new exercise of the same session.
+        if last_activity is not None:
+            gap_days = (now - last_activity).days
+            if gap_days > 3:
+                return f"Back at it after {gap_days} days."
+        else:
+            for ex in exercises:
+                ex_hist = hist_by_ex.get(ex["exercise_id"], [])
+                if ex_hist:
+                    most_recent_date = max(ws.set_date for ws in ex_hist)
+                    gap_days = (now - most_recent_date).days
+                    if gap_days > 3:
+                        return f"Back at it after {gap_days} days."
 
         # 4. Weight increase vs most recent
         for ex in exercises:
@@ -611,6 +644,12 @@ class MessageHandler:
             if val is not None:
                 updates[dst] = val
 
+        # "these are scapular pushups, not regular ones" — the exercise itself is wrong.
+        rename_to = (data.new_exercise_name or "").strip() or None
+        target_name = data.exercise_name
+        if rename_to and target_name and score_match(target_name, rename_to) == 1.0:
+            target_name = None  # the extractor put the corrected name in both slots
+
         # "5lb more" / "2 fewer reps" are deltas on the existing value. The extractor
         # reads them as absolute ("weight to 5"), so parse them here and override.
         deltas = self._parse_relative_edit(message)
@@ -628,30 +667,60 @@ class MessageHandler:
                 if not target_sets:
                     return f"Workout #{data.batch_id} not found (or not yours)."
 
-            elif data.exercise_name:
+            elif target_name:
                 # Resolve exercise name
-                exercise = await exercise_repo.get_by_name(session, data.exercise_name)
+                exercise = await exercise_repo.get_by_name(session, target_name)
                 if not exercise:
                     exercise = await self._match_logged_exercise(
-                        session, data.exercise_name, user_id
+                        session, target_name, user_id
                     )
-                if not exercise:
-                    return f"Exercise '{data.exercise_name}' not found."
-                target_sets = await workout_set_repo.get_latest_sets_for_exercise(
-                    session, exercise.id, user_id
-                )
-                if not target_sets:
+                if exercise:
+                    target_sets = await workout_set_repo.get_latest_sets_for_exercise(
+                        session, exercise.id, user_id
+                    )
+                # A rename falls through to the last batch when the named exercise
+                # can't be pinned down; a value edit must not guess.
+                if not target_sets and not rename_to:
+                    if not exercise:
+                        return f"Exercise '{target_name}' not found."
                     return f"No logged sets for {exercise.name}."
 
-            else:
+            if not target_sets:
                 # Default: last batch
                 target_sets = await workout_set_repo.get_latest_batch_for_user(session, user_id)
                 if not target_sets:
                     return "Nothing to edit — no workouts found."
+                if rename_to:
+                    # Rename only the exercise logged last, not a whole mixed batch.
+                    newest = max(target_sets, key=lambda ws: ws.id)
+                    target_sets = [
+                        ws for ws in target_sets if ws.exercise_id == newest.exercise_id
+                    ]
+
+            new_exercise = None
+            if rename_to:
+                new_exercise = await exercise_repo.get_by_name(session, rename_to)
+                if not new_exercise:
+                    scored = await exercise_repo.search_scored(session, rename_to)
+                    if scored and scored[0][1] >= 0.5:
+                        new_exercise = scored[0][0]
+                    else:
+                        new_exercise = await exercise_repo.create(
+                            session,
+                            obj_in={
+                                # The extractor often echoes the user's lowercase.
+                                "name": rename_to.title() if rename_to.islower() else rename_to,
+                                "muscle_group": guess_muscle_group(rename_to),
+                            },
+                        )
+                if all(ws.exercise_id == new_exercise.id for ws in target_sets):
+                    new_exercise = None  # already that exercise — nothing to rename
 
             # No value given (e.g. a bare "edit") — echo the target we'd change and
             # ask for the new value instead of dead-ending.
-            if not updates and not deltas:
+            if not updates and not deltas and not new_exercise:
+                if rename_to:
+                    return f"Those sets are already logged as {rename_to}."
                 return (
                     f"Editing {self._describe_edit_target(target_sets)} — what should I change? "
                     f"Say e.g. 'reps to 12', 'weight to 185', or 'notes to felt easy'."
@@ -681,12 +750,21 @@ class MessageHandler:
                         afters.append(new_display)
                     setattr(ws, field, new_val)
 
+                changes: list[str] = []
+                if new_exercise and ws.exercise_id != new_exercise.id:
+                    ws.exercise = new_exercise
+                    ws.raw_exercise_name = rename_to
+                    changes.append(f"now {new_exercise.name}")
+
                 await session.flush()
 
                 if befores:
-                    change_lines.append(f"  {name} set {ws.set_number}: {' / '.join(befores)} → {' / '.join(afters)}")
-                else:
-                    change_lines.append(f"  {name} set {ws.set_number}: updated")
+                    changes.append(f"{' / '.join(befores)} → {' / '.join(afters)}")
+                if "notes" in set_updates:
+                    changes.append(f"note: {set_updates['notes']}")
+                change_lines.append(
+                    f"  {name} set {ws.set_number}: {', '.join(changes) or 'updated'}"
+                )
 
         n = len(target_sets)
         set_word = "set" if n == 1 else "sets"
@@ -695,12 +773,24 @@ class MessageHandler:
 
     @staticmethod
     def _is_bare_set(message: str) -> bool:
-        """True for a set with no exercise name: "12@55", "10x45 lb", "2x12@55, easy"."""
-        return bool(re.fullmatch(
-            r"\s*(?:\d+\s*x\s*)?\d+\s*[x@]\s*\d+(?:\.\d+)?\s*(?:lbs?|kg)?\s*(?:[,;:-].*)?",
+        """True for a set with no exercise name: "12@55", "10x45 lb", "2x12@55, easy".
+
+        Trailing text needs a separator, or the word "reps" before it plus no hint of
+        an exercise in it: "2x12 reps heavy blue band" is bare (Oct 13 — it was logged
+        as a made-up "Resistance Band Exercise"), "3x10 reps bench press" is not.
+        """
+        m = re.fullmatch(
+            r"\s*(?:\d+\s*x\s*)?\d+\s*[x@]\s*\d+(?:\.\d+)?\s*(?:lbs?|kg)?\s*"
+            r"(?P<reps>reps?\b)?\s*(?P<tail>.*)",
             message,
             re.IGNORECASE | re.DOTALL,
-        ))
+        )
+        if not m:
+            return False
+        tail = m.group("tail").strip()
+        if not tail or tail[0] in ",;:-":
+            return True
+        return bool(m.group("reps")) and guess_muscle_group(tail) == "general"
 
     @staticmethod
     def _is_unnamed_exercise(name: str | None) -> bool:
@@ -1146,37 +1236,61 @@ class MessageHandler:
             if not sets:
                 return f"No history for {exercise.name}."
 
-            # Group by batch_id
-            batches: OrderedDict[int, list] = OrderedDict()
-            for s in sets:
-                batches.setdefault(s.batch_id, []).append(s)
+            # Group by day — a gym visit is one session however many messages it
+            # took to log ("Oct 9: 12x40 / 12x40 / 12x55", not three "Oct 9" lines).
+            by_day: dict = {}
+            for ws in sets:
+                by_day.setdefault(ws.set_date.date(), []).append(ws)
+            day_keys = sorted(by_day, reverse=True)[:20]
 
-            lines: list[str] = [f"{exercise.name} — last {len(batches)} sessions:"]
-            for batch_id, batch_sets in list(batches.items())[:20]:
-                first = batch_sets[0]
+            noun = "session" if len(day_keys) == 1 else "sessions"
+            lines: list[str] = [f"{exercise.name} — last {len(day_keys)} {noun}:"]
+            for day in day_keys:
+                day_sets = sorted(by_day[day], key=lambda ws: ws.id)
+                first = day_sets[0]
                 date_str = first.set_date.strftime("%b %-d")
 
                 if first.duration_minutes:
-                    parts = [f"{first.duration_minutes} min"]
-                    if first.distance:
-                        parts.append(f"{first.distance:g} mi")
-                    lines.append(f"  {date_str}: {', '.join(parts)}")
+                    entries: list[str] = []
+                    for ws in day_sets:
+                        parts = [f"{ws.duration_minutes} min"]
+                        if ws.distance:
+                            parts.append(f"{ws.distance:g} mi")
+                        entries.append(", ".join(parts))
+                    line = f"  {date_str}: {' / '.join(entries)}"
                 else:
-                    n = len(batch_sets)
+                    n = len(day_sets)
                     all_same = all(
-                        s.reps == first.reps and s.weight == first.weight
-                        for s in batch_sets
+                        ws.reps == first.reps
+                        and ws.weight == first.weight
+                        and ws.weight_unit == first.weight_unit
+                        for ws in day_sets
                     )
                     if all_same and first.weight is not None:
                         w_str = self._fmt_weight(first.weight, first.weight_unit)
-                        lines.append(f"  {date_str}: {n}x{first.reps} @ {w_str}")
+                        line = f"  {date_str}: {n}x{first.reps} @ {w_str}"
+                    elif all_same:
+                        line = f"  {date_str}: {n}x{first.reps or 0}"
                     else:
                         set_strs: list[str] = []
-                        for s in batch_sets:
-                            r = s.reps or 0
-                            w_str = self._fmt_weight(s.weight, s.weight_unit)
-                            set_strs.append(f"{r}x{w_str}")
-                        lines.append(f"  {date_str}: {' / '.join(set_strs)}")
+                        for ws in day_sets:
+                            r = ws.reps or 0
+                            if ws.weight is not None:
+                                w_str = self._fmt_weight(ws.weight, ws.weight_unit)
+                                set_strs.append(f"{r}x{w_str}")
+                            else:
+                                set_strs.append(f"{r} reps")
+                        line = f"  {date_str}: {' / '.join(set_strs)}"
+
+                # Notes are why the user asks for history as often as the numbers
+                # ("which band was it?") — show each distinct one once.
+                notes: list[str] = []
+                for ws in day_sets:
+                    if ws.notes and ws.notes not in notes:
+                        notes.append(ws.notes)
+                if notes:
+                    line += f" — {'; '.join(notes)}"
+                lines.append(line)
 
             return "\n".join(lines)
 
