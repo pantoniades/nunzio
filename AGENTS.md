@@ -30,6 +30,7 @@ python scripts/migrate_v05.py      # v0.5 migration (flatten sessions into sets)
 python scripts/migrate_v07.py      # v0.7: user_settings table
 python scripts/migrate_v08.py      # v0.8: proactive_log table
 python scripts/migrate_v09.py      # v0.9: exercise cleanup — dry run; --apply to write (back up first)
+python scripts/migrate_v10.py      # v0.10: unit + nudge-pause columns, exercise cleanup — dry run; --apply
 ```
 
 ## Workflow
@@ -84,5 +85,5 @@ tests/                 # Unit + integration tests
 - **Weight storage**: Float column + weight_unit string (lbs/kg), stored as-is from user input
 - **Exercise matching**: exact name → normalized-token Jaccard with equipment/angle penalty (≥0.5) → create ad-hoc with `guess_muscle_group()`. Raw name always preserved. Different machines for one movement stay separate exercises (loads aren't comparable).
 - **Deterministic shortcuts before/around the LLM**: bare sets ("12@55") get the last exercise name prefixed before classification; repeat overrides and relative edits ("5lb more") are regex-parsed in `core.py`.
-- **Intent routing**: 9 intents (log_workout, log_weight, set_timezone, view_stats, list_workouts, edit_set, delete_workout, repeat_last, coaching)
+- **Intent routing**: 11 intents (log_workout, log_weight, set_timezone, set_units, pause_nudges, view_stats, list_workouts, edit_set, delete_workout, repeat_last, coaching)
 - **Message logging**: fire-and-forget in process(), exception-swallowed

@@ -3,12 +3,12 @@
 import logging
 import re
 from collections import OrderedDict
-from datetime import datetime, timedelta
+from datetime import date as date_type, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import config
 from .database.connection import db_manager
-from .database.models import now_in_tz
+from .database.models import DEFAULT_UNIT, now_in_tz
 from .database.repository import (
     body_weight_repo,
     exercise_repo,
@@ -16,7 +16,7 @@ from .database.repository import (
     user_settings_repo,
     workout_set_repo,
 )
-from .exercise_names import guess_muscle_group, score_match
+from .exercise_names import guess_muscle_group, same_but_for_equipment, score_match
 from .llm.client import LLMClient
 from .llm.context import build_coaching_context
 from .stats import compute_consistency
@@ -35,6 +35,14 @@ _PLAUSIBLE_BODY_WEIGHT = {"lbs": (50.0, 700.0), "kg": (25.0, 320.0)}
 _BODY_WEIGHT_OVERRIDE = ("body weight", "bodyweight", "i weigh", "my weight")
 
 _LBS_PER_KG = 2.20462
+
+_UNIT_NAMES = {"lbs": "pounds", "kg": "kilograms"}
+# "Stop nudging me" with no date: held until the user says otherwise.
+_PAUSE_INDEFINITELY = date_type(2999, 12, 31)
+# An unstated-unit "again @4" after a 30 lb set is a typo for 40, not a real set:
+# refuse a repeat whose weight is off from the last set by more than this factor.
+_REPEAT_WEIGHT_FACTOR = 3.0
+_REPEAT_GUARD_MIN_WEIGHT = 10.0
 
 # Map loose category words to the canonical muscle_group values seeded in the DB,
 # so "what aerobic have I done" resolves to the cardio group instead of dead-ending.
@@ -97,6 +105,7 @@ class MessageHandler:
         # "today") in this message resolve in the zone they're currently in.
         async with db_manager.get_session() as session:
             user_tz = await user_settings_repo.get_timezone(session, user_id)
+            unit_pref = await user_settings_repo.get_weight_unit(session, user_id)
             # A bare set ("10x45", "12@55 lb, felt heavy") means "same exercise as last
             # time". Name it up front so classification and extraction can't misroute it.
             if self._is_bare_set(message):
@@ -114,13 +123,21 @@ class MessageHandler:
 
         if intent.intent == "log_workout" and intent.confidence > 0.5:
             # _handle_log_workout extracts the workout data itself (sequentially).
-            response = await self._handle_log_workout(message, user_id, user_tz)
+            response = await self._handle_log_workout(
+                message, user_id, user_tz, unit_pref=unit_pref
+            )
         elif intent.intent == "log_weight":
-            response = await self._handle_log_weight(message, user_id, user_tz)
+            response = await self._handle_log_weight(message, user_id, user_tz, unit_pref)
         elif intent.intent == "set_timezone":
             response = await self._handle_set_timezone(intent, user_id)
+        elif intent.intent == "set_units":
+            response = await self._handle_set_units(intent, message, user_id)
+        elif intent.intent == "pause_nudges":
+            response = await self._handle_pause_nudges(intent, message, user_id, user_tz)
         elif intent.intent == "view_stats":
-            response = await self._handle_view_stats(intent, user_id, user_tz, message)
+            response = await self._handle_view_stats(
+                intent, user_id, user_tz, message, unit_pref
+            )
         elif intent.intent == "list_workouts":
             response = await self._handle_list_workouts(user_id)
         elif intent.intent == "edit_set":
@@ -130,7 +147,9 @@ class MessageHandler:
         elif intent.intent == "repeat_last":
             response = await self._handle_repeat_last(message, user_id, user_tz)
         else:
-            response = await self._handle_coaching(message, intent, user_id, user_tz)
+            response = await self._handle_coaching(
+                message, intent, user_id, user_tz, unit_pref
+            )
 
         if self._llm.model_override:
             response += f"\n(using {self._llm.model_override} instead of configured {config.llm.model})"
@@ -157,6 +176,13 @@ class MessageHandler:
             logger.warning("Message logging failed", exc_info=True)
 
         return response
+
+    @staticmethod
+    def _states_unit(message: str) -> bool:
+        """True when the message names a weight unit ("55 lb", "20kg", "pounds")."""
+        return bool(re.search(
+            r"(?<![a-z])(lbs?|pounds?|kgs?|kilos?|kilograms?)\b", message, re.IGNORECASE
+        ))
 
     @staticmethod
     def _is_plan_not_log(message: str) -> bool:
@@ -208,14 +234,29 @@ class MessageHandler:
         return expanded
 
     async def _handle_log_workout(
-        self, message: str, user_id: int, user_tz: str = "America/New_York", *, workout_data=None
+        self,
+        message: str,
+        user_id: int,
+        user_tz: str = "America/New_York",
+        *,
+        workout_data=None,
+        unit_pref: str = DEFAULT_UNIT,
     ) -> str:
         if workout_data is None:
-            workout_data = await self._llm.extract_workout_data(message, user_tz)
+            workout_data = await self._llm.extract_workout_data(
+                message, user_tz, unit_pref
+            )
         if not workout_data or not workout_data.exercises:
             return "I couldn't extract workout details. Try something like: '3 sets of bench press at 185 lbs, 10 reps'"
 
         workout_data.exercises = self._expand_sets(workout_data.exercises)
+
+        # No unit in the message means the user's preferred one — decided here, not
+        # left to the extractor, whose schema default would otherwise win.
+        if not self._states_unit(message):
+            for ex_set in workout_data.exercises:
+                if ex_set.unit != "bodyweight":
+                    ex_set.unit = unit_pref
 
         # Apply sensible defaults for missing reps (strength only)
         defaulted_reps: set[int] = set()  # indices where we assumed reps
@@ -276,9 +317,24 @@ class MessageHandler:
                     scored = await exercise_repo.search_scored(session, raw_name)
                     if scored and scored[0][1] >= 0.5:
                         exercise = scored[0][0]
+                    else:
+                        # 3. The one exercise this user logs that differs only by the
+                        # equipment they left out ("skull crushers" for their
+                        # "Dumbbell Skull Crusher").
+                        logged_ids = await workout_set_repo.get_exercise_ids_for_user(
+                            session, user_id
+                        )
+                        variants = [
+                            ex for ex, _score in scored
+                            if ex.id in logged_ids
+                            and same_but_for_equipment(raw_name, ex.name)
+                        ]
+                        if len(variants) == 1:
+                            exercise = variants[0]
+                    if exercise:
                         matched_differently = (exercise.name.lower() != raw_name.lower())
                     else:
-                        # 3. Score too low — create ad-hoc exercise with user's name
+                        # 4. Nothing close — create ad-hoc exercise with user's name
                         exercise = await exercise_repo.create(
                             session,
                             obj_in={
@@ -596,6 +652,11 @@ class MessageHandler:
             if not deleted:
                 return f"Workout #{batch_id} not found (or not yours)."
 
+            # A deleted mislog shouldn't leave its made-up exercise in the catalog.
+            await session.flush()
+            for ex_id in {s.exercise_id for s in deleted}:
+                await exercise_repo.delete_if_orphan(session, ex_id)
+
             # Build confirmation showing what was deleted
             exercises: list[str] = []
             for s in deleted:
@@ -841,14 +902,18 @@ class MessageHandler:
         """Parse overrides and counts from a repeat message.
 
         Returns dict with keys: reps, weight, weight_unit, times, sets, note.
+        ``weight_unit`` is None unless the message states one.
         ``times`` repeats the whole last batch; ``sets`` (when not None) instead logs
         that many sets of the last exercise ("one more set", "2 more sets", "2x12@55").
         """
         unit_re = r"\s*(lbs?|kg)?\b"
         num_words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
 
-        def _unit(u: str | None) -> str:
-            return "kg" if u and u.lower().startswith("k") else "lbs"
+        def _unit(u: str | None) -> str | None:
+            # None = no unit stated: the repeat keeps the unit of the set it copies.
+            if not u:
+                return None
+            return "kg" if u.lower().startswith("k") else "lbs"
 
         reps = None
         weight = None
@@ -913,9 +978,8 @@ class MessageHandler:
                 weight_unit = _unit(u)
                 note = note[:weight_match.start()] + note[weight_match.end():]
             elif re.fullmatch(r"\d+(?:\.\d+)?", note):
-                # Bare number with no unit: "again 54" → 54 lbs
+                # Bare number with no unit: "again 54" → 54, in the last set's unit
                 weight = float(note)
-                weight_unit = "lbs"
                 note = None
 
         # Repetition count: "twice", "x2", "2x", "2 times", "3 times"
@@ -963,12 +1027,35 @@ class MessageHandler:
                 template = max(last_sets, key=lambda s: s.id)
                 sorted_sets = [template] * mods["sets"]
 
-            logged: list[str] = []
-            for _rep in range(mods["times"]):
-                new_batch_id = await workout_set_repo.get_next_batch_id(session, user_id)
+            # Typo guard: "again @4" after 30 lbs (Oct 16) was meant as 40. A weight
+            # with no unit that is wildly off the set being repeated isn't logged;
+            # stating the unit confirms it.
+            if mods["weight"] is not None and mods["weight_unit"] is None:
+                ref = max(
+                    (s for s in sorted_sets if s.weight), key=lambda s: s.weight,
+                    default=None,
+                )
+                if ref and ref.weight >= _REPEAT_GUARD_MIN_WEIGHT:
+                    ratio = mods["weight"] / ref.weight
+                    if ratio > _REPEAT_WEIGHT_FACTOR or ratio < 1 / _REPEAT_WEIGHT_FACTOR:
+                        return (
+                            f"{mods['weight']:g} looks off next to your last set at "
+                            f"{ref.weight:g} {ref.weight_unit}, so I didn't log it. If "
+                            f"that's right, add the unit: "
+                            f"'again @{mods['weight']:g} {ref.weight_unit}'."
+                        )
 
+            logged: list[str] = []
+            # One message, one batch — "again twice" is a single undoable log whose
+            # set numbers run on (it used to make two batches, both "set 1").
+            new_batch_id = await workout_set_repo.get_next_batch_id(session, user_id)
+            next_number: dict[int, int] = {}
+            for _rep in range(mods["times"]):
                 for set_number, old_set in enumerate(sorted_sets, start=1):
-                    if not mods["sets"]:
+                    if mods["times"] > 1:
+                        set_number = next_number.get(old_set.exercise_id, 0) + 1
+                        next_number[old_set.exercise_id] = set_number
+                    elif not mods["sets"]:
                         set_number = old_set.set_number
                     use_weight = mods["weight"] if mods["weight"] is not None else old_set.weight
                     use_unit = mods["weight_unit"] if mods["weight_unit"] is not None else old_set.weight_unit
@@ -1010,12 +1097,12 @@ class MessageHandler:
         return "\n".join([header] + logged)
 
     @staticmethod
-    def _fmt_weight(w: float | None, unit: str) -> str:
-        """Format weight: drop .0, omit unit when lbs."""
+    def _fmt_weight(w: float | None, unit: str, pref: str = "lbs") -> str:
+        """Format weight: drop .0, omit the unit when it's the user's preferred one."""
         if w is None:
             return "bodyweight"
         w_str = f"{w:g}"
-        if unit and unit != "lbs":
+        if unit and unit != pref:
             return f"{w_str} {unit}"
         return w_str
 
@@ -1031,28 +1118,41 @@ class MessageHandler:
         )
 
     async def _handle_view_stats(
-        self, intent, user_id: int, user_tz: str = "America/New_York", message: str = ""
+        self,
+        intent,
+        user_id: int,
+        user_tz: str = "America/New_York",
+        message: str = "",
+        unit_pref: str = DEFAULT_UNIT,
     ) -> str:
         stats_type = getattr(intent, "stats_type", None) or "overview"
         # Non-overview views aren't paginated — clear any stale page cursor.
         if stats_type in ("prs", "exercise_history", "volume", "consistency", "weight"):
             self._stats_pages.pop(user_id, None)
         if stats_type == "prs":
-            return await self._handle_prs(user_id)
+            return await self._handle_prs(user_id, unit_pref)
         elif stats_type == "exercise_history":
-            return await self._handle_exercise_history(intent, user_id)
+            return await self._handle_exercise_history(intent, user_id, unit_pref)
         elif stats_type == "volume":
-            return await self._handle_volume_trends(user_id)
+            return await self._handle_volume_trends(user_id, unit_pref)
         elif stats_type == "consistency":
             return await self._handle_consistency(user_id, user_tz)
         elif stats_type == "weight":
             return await self._handle_weight_trend(user_id)
         else:
             page = self._stats_pages.get(user_id, 0) + 1 if self._is_more_request(message) else 0
-            return await self._handle_overview(user_id, intent, user_tz, page=page)
+            return await self._handle_overview(
+                user_id, intent, user_tz, page=page, unit_pref=unit_pref
+            )
 
     async def _handle_overview(
-        self, user_id: int, intent=None, user_tz: str = "America/New_York", *, page: int = 0
+        self,
+        user_id: int,
+        intent=None,
+        user_tz: str = "America/New_York",
+        *,
+        page: int = 0,
+        unit_pref: str = DEFAULT_UNIT,
     ) -> str:
         """Stats overview with optional date filtering.
 
@@ -1155,7 +1255,7 @@ class MessageHandler:
                     )
 
                     if all_same and first.weight is not None:
-                        w_str = self._fmt_weight(first.weight, first.weight_unit)
+                        w_str = self._fmt_weight(first.weight, first.weight_unit, unit_pref)
                         lines.append(f"  {name} \u2014 {len(ex_sets)}x{first.reps} @ {w_str}")
                     elif all_same and first.weight is None:
                         lines.append(f"  {name} \u2014 {len(ex_sets)}x{first.reps}")
@@ -1164,7 +1264,7 @@ class MessageHandler:
                         for s in ex_sets:
                             r = s.reps or 0
                             if s.weight is not None:
-                                w_str = self._fmt_weight(s.weight, s.weight_unit)
+                                w_str = self._fmt_weight(s.weight, s.weight_unit, unit_pref)
                                 set_strs.append(f"{r}x{w_str}")
                             else:
                                 set_strs.append(f"{r} reps")
@@ -1175,7 +1275,7 @@ class MessageHandler:
                 lines.append("(say 'more' for older workouts)")
             return "\n".join(lines)
 
-    async def _handle_prs(self, user_id: int) -> str:
+    async def _handle_prs(self, user_id: int, unit_pref: str = DEFAULT_UNIT) -> str:
         """Show personal records — heaviest weight per exercise."""
         async with db_manager.get_session() as session:
             prs = await workout_set_repo.get_all_prs(session, user_id)
@@ -1186,7 +1286,7 @@ class MessageHandler:
             lines: list[str] = ["Personal Records:"]
             for ws in prs:
                 name = ws.exercise.name if ws.exercise else f"exercise #{ws.exercise_id}"
-                w_str = self._fmt_weight(ws.weight, ws.weight_unit)
+                w_str = self._fmt_weight(ws.weight, ws.weight_unit, unit_pref)
                 date_str = ws.set_date.strftime("%b %-d")
                 reps_str = f" x {ws.reps}" if ws.reps else ""
                 lines.append(f"  {name}: {w_str}{reps_str} ({date_str})")
@@ -1209,7 +1309,9 @@ class MessageHandler:
                 return ex
         return scored[0][0] if scored and scored[0][1] >= 0.5 else None
 
-    async def _handle_exercise_history(self, intent, user_id: int) -> str:
+    async def _handle_exercise_history(
+        self, intent, user_id: int, unit_pref: str = DEFAULT_UNIT
+    ) -> str:
         """Show history for a specific exercise."""
         async with db_manager.get_session() as session:
             # Resolve exercise from mentioned_exercises
@@ -1226,7 +1328,9 @@ class MessageHandler:
                 # single exercise — summarize sessions across that muscle group.
                 group = self._resolve_muscle_group(intent)
                 if group:
-                    return await self._handle_category_history(session, group, user_id)
+                    return await self._handle_category_history(
+                        session, group, user_id, unit_pref
+                    )
                 return "Which exercise? Try 'bench press history' — or a group like 'cardio'."
 
             sets = await workout_set_repo.get_by_exercise(
@@ -1267,7 +1371,7 @@ class MessageHandler:
                         for ws in day_sets
                     )
                     if all_same and first.weight is not None:
-                        w_str = self._fmt_weight(first.weight, first.weight_unit)
+                        w_str = self._fmt_weight(first.weight, first.weight_unit, unit_pref)
                         line = f"  {date_str}: {n}x{first.reps} @ {w_str}"
                     elif all_same:
                         line = f"  {date_str}: {n}x{first.reps or 0}"
@@ -1276,7 +1380,7 @@ class MessageHandler:
                         for ws in day_sets:
                             r = ws.reps or 0
                             if ws.weight is not None:
-                                w_str = self._fmt_weight(ws.weight, ws.weight_unit)
+                                w_str = self._fmt_weight(ws.weight, ws.weight_unit, unit_pref)
                                 set_strs.append(f"{r}x{w_str}")
                             else:
                                 set_strs.append(f"{r} reps")
@@ -1306,7 +1410,9 @@ class MessageHandler:
                 return group
         return None
 
-    async def _handle_category_history(self, session, group: str, user_id: int) -> str:
+    async def _handle_category_history(
+        self, session, group: str, user_id: int, unit_pref: str = DEFAULT_UNIT
+    ) -> str:
         """Summarize recent sessions across all exercises in a muscle group."""
         exercises = await exercise_repo.get_by_muscle_group(session, group)
         if not exercises:
@@ -1343,17 +1449,21 @@ class MessageHandler:
                         parts.append(f"{s.distance:g} mi")
                     detail = ", ".join(parts)
                 elif s.weight is not None:
-                    detail = f"{s.reps or 0}x{self._fmt_weight(s.weight, s.weight_unit)}"
+                    detail = f"{s.reps or 0}x{self._fmt_weight(s.weight, s.weight_unit, unit_pref)}"
                 else:
                     detail = f"{s.reps or 0} reps"
                 lines.append(f"  {date_str} — {name}: {detail}")
 
         return "\n".join(lines)
 
-    async def _handle_volume_trends(self, user_id: int) -> str:
+    async def _handle_volume_trends(
+        self, user_id: int, unit_pref: str = DEFAULT_UNIT
+    ) -> str:
         """Show weekly volume by muscle group for the last 8 weeks."""
         async with db_manager.get_session() as session:
-            rows = await workout_set_repo.get_weekly_volume(session, user_id, weeks=8)
+            rows = await workout_set_repo.get_weekly_volume(
+                session, user_id, weeks=8, unit=unit_pref
+            )
 
             if not rows:
                 return "No volume data yet — log some weighted exercises first!"
@@ -1370,7 +1480,7 @@ class MessageHandler:
                 week = yw % 100
                 lines.append(f"  Week {week} ({year}):")
                 for mg, vol in groups:
-                    lines.append(f"    {mg}: {vol:,.0f} lbs")
+                    lines.append(f"    {mg}: {vol:,.0f} {unit_pref}")
 
             return "\n".join(lines)
 
@@ -1431,12 +1541,18 @@ class MessageHandler:
             return "\n".join(lines)
 
     async def _handle_log_weight(
-        self, message: str, user_id: int, user_tz: str = "America/New_York"
+        self,
+        message: str,
+        user_id: int,
+        user_tz: str = "America/New_York",
+        unit_pref: str = DEFAULT_UNIT,
     ) -> str:
         """Log a body weight reading."""
-        data = await self._llm.extract_body_weight_data(message, user_tz)
+        data = await self._llm.extract_body_weight_data(message, user_tz, unit_pref)
         if not data:
             return "I couldn't extract a weight reading. Try something like: 'weighed 185 lbs'"
+        if not self._states_unit(message):
+            data.unit = unit_pref
 
         # Plausibility guard: reject obvious mislogs (e.g. "20 lb" that was really a set
         # weight) unless the user explicitly framed it as a body weight.
@@ -1542,11 +1658,67 @@ class MessageHandler:
         local_now = datetime.now(tz).strftime("%-I:%M %p")
         return f"Timezone set to {tz_name} — it's {local_now} there now."
 
+    async def _handle_set_units(self, intent, message: str, user_id: int) -> str:
+        """Save the user's preferred weight unit ("use pounds", "metric please")."""
+        unit = getattr(intent, "mentioned_unit", None)
+        if unit not in _UNIT_NAMES:
+            wants_lbs = bool(re.search(r"\b(lbs?|pounds?|imperial)\b", message, re.I))
+            wants_kg = bool(re.search(r"\b(kgs?|kilos?|kilograms?|metric)\b", message, re.I))
+            if wants_lbs == wants_kg:
+                return "Pounds or kilograms? Say e.g. 'use pounds' or 'use kg'."
+            unit = "lbs" if wants_lbs else "kg"
+
+        async with db_manager.get_session() as session:
+            await user_settings_repo.set_weight_unit(session, user_id, unit)
+
+        return (
+            f"Got it — {_UNIT_NAMES[unit]} from here on. Weights you give without a "
+            f"unit are saved in {unit}, and that's what I'll coach in. Sets already "
+            f"logged keep the unit they were logged in."
+        )
+
+    async def _handle_pause_nudges(
+        self, intent, message: str, user_id: int, user_tz: str = "America/New_York"
+    ) -> str:
+        """Hold (or resume) inactivity nudges — "injured till Tuesday", "resume nudges"."""
+        today = now_in_tz(user_tz).date()
+        resume = bool(getattr(intent, "resume_nudges", False)) or bool(
+            re.search(r"\b(resume|unpause)\b", message, re.IGNORECASE)
+        )
+        if resume:
+            async with db_manager.get_session() as session:
+                await user_settings_repo.set_nudges_paused_until(session, user_id, None)
+            return "Check-ins are back on. I'll nudge you if you go quiet."
+
+        until = getattr(intent, "pause_until", None)
+        if until is not None and until < today:
+            until = None  # a date in the past is a misread, not a pause
+        async with db_manager.get_session() as session:
+            await user_settings_repo.set_nudges_paused_until(
+                session, user_id, until or _PAUSE_INDEFINITELY
+            )
+
+        if until is None:
+            return (
+                "Understood — no nudges until you tell me otherwise. Say 'resume "
+                "nudges' when you want them back, or just log a workout any time."
+            )
+        label = until.strftime("%a %b %-d")
+        return (
+            f"Understood — no nudges through {label}. Take care of yourself; "
+            f"say 'resume nudges' if you're back sooner."
+        )
+
     async def _handle_coaching(
-        self, message: str, intent, user_id: int, user_tz: str = "America/New_York"
+        self,
+        message: str,
+        intent,
+        user_id: int,
+        user_tz: str = "America/New_York",
+        unit_pref: str = DEFAULT_UNIT,
     ) -> str:
         async with db_manager.get_session() as session:
             context = await build_coaching_context(
-                session, intent, message, user_id, user_tz
+                session, intent, message, user_id, user_tz, unit_pref
             )
             return await self._llm.generate_coaching_response(message, context)

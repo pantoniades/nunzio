@@ -133,12 +133,13 @@ python scripts/migrate_v05.py   # v0.3/v0.4 → v0.5: flattens sessions into set
 python scripts/migrate_v07.py   # → v0.7: adds user_settings (per-user timezone)
 python scripts/migrate_v08.py   # → v0.8: adds proactive_log (check-in dedup)
 python scripts/migrate_v09.py   # → v0.9: exercise cleanup — dry run; add --apply to write
+python scripts/migrate_v10.py   # → v0.10: unit + nudge-pause columns, exercise cleanup — dry run; add --apply
 ```
 
 All are idempotent — safe to run multiple times. `migrate_v07.py` and
-`migrate_v08.py` only create new tables. `migrate_v09.py` changes data (merges
-duplicate exercises, splits mis-matched sets, backfills muscle groups), so it
-prints its plan unless you pass `--apply`. Back up `exercises` and `workout_sets` first.
+`migrate_v08.py` only create new tables. `migrate_v09.py` and `migrate_v10.py`
+change data (merge duplicate exercises, split mis-matched sets; v0.10 also adds two
+`user_settings` columns), so they print their plan unless you pass `--apply`. Back up `exercises` and `workout_sets` first.
 
 ## Configuration
 
@@ -167,6 +168,8 @@ User message
       delete_workout → parse "undo"/"last"/batch ID → delete batch
       repeat_last    → regex-parsed overrides → clone sets (or N sets of the last one)
       set_timezone   → resolve IANA zone → user_settings
+      set_units      → lbs / kg preference → user_settings
+      pause_nudges   → hold check-in nudges until a date (or resume)
       coaching       → build_coaching_context() → generate_coaching_response()
   → Log to message_log table
   → Return response
@@ -174,7 +177,7 @@ User message
 
 ### Intent routing
 
-9 intents: `log_workout`, `log_weight`, `set_timezone`, `view_stats`, `list_workouts`, `edit_set`, `delete_workout`, `repeat_last`, and `coaching` (catch-all). Classification uses Instructor (JSON mode) with a fallback keyword matcher if the LLM call fails. `edit_set` extraction uses Instructor TOOLS mode (gemma returns all-null on that schema in JSON mode).
+11 intents: `log_workout`, `log_weight`, `set_timezone`, `set_units`, `pause_nudges`, `view_stats`, `list_workouts`, `edit_set`, `delete_workout`, `repeat_last`, and `coaching` (catch-all). Classification uses Instructor (JSON mode) with a fallback keyword matcher if the LLM call fails. `edit_set` extraction uses Instructor TOOLS mode (gemma returns all-null on that schema in JSON mode).
 
 ### Exercise matching
 
@@ -228,7 +231,8 @@ scripts/
 ├── migrate_v05.py       # v0.5 migration (flatten sessions into sets)
 ├── migrate_v07.py       # v0.7 migration (user_settings: per-user timezone)
 ├── migrate_v08.py       # v0.8 migration (proactive_log)
-└── migrate_v09.py       # v0.9 exercise cleanup (dry run unless --apply)
+├── migrate_v09.py       # v0.9 exercise cleanup (dry run unless --apply)
+└── migrate_v10.py       # v0.10 unit/pause columns + exercise cleanup (dry run unless --apply)
 
 tests/                         # 168 tests; most hit the real LLM + MySQL
 ├── test_exercise_matching.py  # Unit: scoring, normalization, muscle-group guessing
@@ -256,7 +260,7 @@ tests/                         # 168 tests; most hit the real LLM + MySQL
 | `training_principles` | category, title, content, priority | Coaching knowledge (9 seeded) |
 | `message_log` | user_id, raw_message, classified_intent, confidence, extracted_data, response_summary | Every interaction logged |
 | `body_weight` | user_id, weight, unit, recorded_at, notes | Weigh-ins |
-| `user_settings` | user_id, timezone | Per-user preferences |
+| `user_settings` | user_id, timezone, weight_unit, nudges_paused_until | Per-user preferences (unit defaults to kg) |
 | `proactive_log` | user_id, kind, ref_key, sent_at | Check-in dedup and nudge spacing |
 
 ### Key patterns

@@ -56,7 +56,7 @@ async def test_repeat_with_weight_override(handler: MessageHandler):
 
 @pytest.mark.asyncio
 async def test_repeat_twice(handler: MessageHandler):
-    """'Again twice' should create two new batches."""
+    """'Again twice' logs both repeats as one batch with set numbers running on."""
     response = await handler.process("did 1 set of squat 5 reps at 225 lbs", user_id=55558)
     assert "Logged" in response
 
@@ -65,10 +65,29 @@ async def test_repeat_twice(handler: MessageHandler):
     assert "x2" in response
     # Should have two copies of the set
     assert response.count("225") == 2
+    assert "set 1" in response and "set 2" in response
 
+    undone = await handler.process("undo", user_id=55558)
+    assert "2 sets removed" in undone
     await handler.process("undo", user_id=55558)
-    await handler.process("undo", user_id=55558)
-    await handler.process("undo", user_id=55558)
+
+
+@pytest.mark.asyncio
+async def test_repeat_refuses_implausible_unitless_weight(handler: MessageHandler):
+    """Oct 16: 'Again @4' (a typo for 40) logged 4 lbs after a 30 lb set."""
+    response = await handler.process("did 1 set of incline dumbbell press 12 reps at 30 lbs", user_id=55559)
+    assert "Logged" in response
+
+    response = await handler.process("again @4", user_id=55559)
+    assert "didn't log" in response
+    assert "again @4 lbs" in response
+
+    response = await handler.process("again @40", user_id=55559)
+    assert "Repeated" in response
+    assert "40" in response and "lbs" in response  # keeps the repeated set's unit
+
+    await handler.process("undo", user_id=55559)
+    await handler.process("undo", user_id=55559)
 
 
 @pytest.mark.asyncio

@@ -1,11 +1,12 @@
 """SQLAlchemy async models for Nunzio workout tracking."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import List
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     BigInteger,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -18,6 +19,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 NYC_TZ = ZoneInfo("America/New_York")
 DEFAULT_TZ = "America/New_York"
+# Weight unit for users who have not chosen one ("lbs" or "kg").
+DEFAULT_UNIT = "kg"
 
 
 def _now_nyc() -> datetime:
@@ -218,7 +221,7 @@ class ProactiveLog(Base):
 
 
 class UserSettings(Base):
-    """Per-user preferences. Currently just timezone, keyed by user_id."""
+    """Per-user preferences, keyed by user_id: timezone, weight unit, nudge pause."""
 
     __tablename__ = "user_settings"
 
@@ -226,6 +229,10 @@ class UserSettings(Base):
     timezone: Mapped[str] = mapped_column(
         String(64), nullable=False, default=DEFAULT_TZ
     )
+    # "lbs" or "kg"; NULL means the user never chose, so DEFAULT_UNIT applies.
+    weight_unit: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Inactivity nudges are held through this date (inclusive); NULL = not paused.
+    nudges_paused_until: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_now_nyc
     )

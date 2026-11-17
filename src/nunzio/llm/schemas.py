@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 class UserIntent(BaseModel):
     """User intent classification with exercise/muscle group extraction."""
-    intent: Literal["log_workout", "view_stats", "list_workouts", "coaching", "delete_workout", "repeat_last", "log_weight", "edit_set", "set_timezone"] = Field(
+    intent: Literal["log_workout", "view_stats", "list_workouts", "coaching", "delete_workout", "repeat_last", "log_weight", "edit_set", "set_timezone", "set_units", "pause_nudges"] = Field(
         description="Primary user intention"
     )
     confidence: float = Field(
@@ -43,6 +43,29 @@ class UserIntent(BaseModel):
             "Map place names or abbreviations to IANA zones (e.g. 'Tokyo' -> "
             "'Asia/Tokyo', 'London' -> 'Europe/London', 'PST'/'Pacific' -> "
             "'America/Los_Angeles', 'eastern' -> 'America/New_York'). Null otherwise."
+        ),
+    )
+    mentioned_unit: Optional[Literal["lbs", "kg"]] = Field(
+        default=None,
+        description=(
+            "For set_units intent: the weight unit the user wants from now on — 'lbs' "
+            "for pounds/lb/imperial, 'kg' for kilograms/kilos/metric. In 'lb, not kg' "
+            "the wanted unit is lbs. Null otherwise."
+        ),
+    )
+    pause_until: Optional[datetime.date] = Field(
+        default=None,
+        description=(
+            "For pause_nudges intent: the date (YYYY-MM-DD) the user expects to be back "
+            "or wants reminders held until ('till Tuesday', 'for a week', 'until Dec 1'), "
+            "resolved against today's date. Null if they gave no date."
+        ),
+    )
+    resume_nudges: bool = Field(
+        default=False,
+        description=(
+            "For pause_nudges intent: true when the user wants reminders turned back ON "
+            "('resume nudges', 'you can remind me again'). False when pausing."
         ),
     )
 

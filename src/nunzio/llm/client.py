@@ -30,6 +30,9 @@ _RESIDENT_MODEL_ALLOWLIST: frozenset[str] = frozenset({
 })
 
 
+_UNIT_WORDS = {"lbs": "pounds", "kg": "kilograms"}
+
+
 def _safe_zone(tz_name: str) -> ZoneInfo:
     """Resolve an IANA zone name, falling back to America/New_York if invalid."""
     try:
@@ -158,6 +161,8 @@ class LLMClient:
         - repeat_last: User wants to log the same workout again ("again", "repeat last", "same as last time", "another set", "one more", "one more set", "same thing")
         - edit_set: User wants to fix, change, or correct a value on an already-logged set ("change reps to 12", "fix weight to 185", "edit last set", "update bench press to 8 reps", "correct #42 set 3 to 200 lbs"), or says the wrong exercise was logged ("these are scapular pushups, not regular ones", "that was incline press, not bench")
         - set_timezone: User wants to set or change their timezone ("set my timezone to London", "I'm in Tokyo now", "switch to Pacific time", "I'm traveling to Berlin", "change timezone to America/Denver"). When this intent applies, also set mentioned_timezone to the IANA zone name (e.g. "Asia/Tokyo", "Europe/London", "America/Los_Angeles").
+        - set_units: User states which weight unit they want used from now on ("use pounds", "switch to kg", "I prefer imperial", "store as lb, not kg", "please give recommendations in lb, not kg unless I ask", "metric please"). Set mentioned_unit to "lbs" or "kg". A unit attached to a set being logged ("bench 10x55 kg") is NOT set_units.
+        - pause_nudges: User says they will be away from training for a while, or wants the reminder/check-in/nudge messages paused or resumed ("I have an injury that will keep me from the gym till Tuesday", "can't work out till Tuesday", "I'm sick, back next week", "traveling until Dec 1", "pause nudges for a week", "stop reminding me", "resume nudges"). Set pause_until to the date they'll be back (null if none given); set resume_nudges=true only when they want reminders back on.
         - coaching: User wants advice, recommendations, questions about training, or anything else
 
         For view_stats intent, also classify the stats_type:
@@ -183,7 +188,7 @@ class LLMClient:
         Exercise names should match common names like "Bench Press", "Squat", "Deadlift", etc.
         Muscle groups should match: chest, back, shoulders, legs, biceps, triceps, core, cardio, flexibility.
 
-        Return the intent, confidence score, stats_type (only for view_stats), stats_date, stats_end_date, any mentioned exercises, and any mentioned muscle groups.
+        Return the intent, confidence score, stats_type (only for view_stats), stats_date, stats_end_date, any mentioned exercises, any mentioned muscle groups, and — only for their intents — mentioned_timezone, mentioned_unit, pause_until, resume_nudges.
         """
 
         try:
@@ -244,11 +249,17 @@ class LLMClient:
         wait=wait_exponential(multiplier=1, min=1, max=10),
     )
     async def extract_workout_data(
-        self, message: str, user_tz: str = "America/New_York"
+        self, message: str, user_tz: str = "America/New_York", default_unit: str = "lbs"
     ) -> WorkoutData | None:
-        """Extract structured workout data from user message."""
+        """Extract structured workout data from user message.
+
+        `default_unit` ("lbs"/"kg") is the unit assumed for weights stated without one.
+        """
         if not self._instructor_client:
             await self.initialize()
+
+        unit = default_unit if default_unit in _UNIT_WORDS else "lbs"
+        unit_word = _UNIT_WORDS[unit]
 
         today = datetime.now(_safe_zone(user_tz))
         today_str = today.strftime("%A, %B %-d, %Y")
@@ -276,7 +287,7 @@ class LLMClient:
           use duration_minutes for time and distance if mentioned. Leave reps as null.
           "20 minutes on the bike" → duration_minutes=20, reps=null
           "ran 3 miles in 25 min" → duration_minutes=25, distance=3.0, reps=null
-        - Weight in pounds unless specified otherwise
+        - Weight in {unit_word} (unit="{unit}") unless the user states a unit
         - If unclear, make reasonable assumptions
         - EXERCISE NAMES: Include movement qualifiers that change which exercise it is.
           Words like incline, decline, seated, low, cable, overhead, reverse, Bulgarian,
@@ -295,16 +306,16 @@ class LLMClient:
           "purple band chest pull" → exercise_name="Chest Pull", notes="purple band"
           "incline press felt easy" → exercise_name="Incline Press", notes="felt easy"
         - REPS×WEIGHT SHORTHAND ("AxB"): for a WEIGHTED exercise, "AxB" with no unit means
-          A reps at B pounds — the FIRST number is reps, the SECOND is weight. Never swap them.
+          A reps at B {unit_word} — the FIRST number is reps, the SECOND is weight. Never swap them.
           Examples:
-          "dumbbell curls 8x30" → reps=8, weight=30 (8 reps at 30 lbs, NOT 30 reps at 8 lbs)
+          "dumbbell curls 8x30" → reps=8, weight=30 (8 reps at a weight of 30, NOT 30 reps at 8)
           "lat pulldown 10x40" → reps=10, weight=40
           "bench 5x225" → reps=5, weight=225
           A unit attached to the second number is respected ("10x55 kg" → reps=10, weight=55, unit=kg).
         - BARE NUMBERS: When a single number follows an exercise name with no "reps", "sets",
           or "x" notation (e.g. "face pull 30", "bench 185"), use exercise context to decide:
           for exercises typically done with external weight (cable, barbell, dumbbell, machine),
-          treat the number as weight in pounds. For bodyweight exercises (pushups, pull-ups,
+          treat the number as weight in {unit_word}. For bodyweight exercises (pushups, pull-ups,
           sit-ups), treat it as reps.
           Examples:
           "face pull 30" → weight=30, reps=null (cable exercise → weight)
@@ -337,11 +348,13 @@ class LLMClient:
         wait=wait_exponential(multiplier=1, min=1, max=10),
     )
     async def extract_body_weight_data(
-        self, message: str, user_tz: str = "America/New_York"
+        self, message: str, user_tz: str = "America/New_York", default_unit: str = "lbs"
     ) -> BodyWeightData | None:
         """Extract body weight data from user message."""
         if not self._instructor_client:
             await self.initialize()
+
+        unit = default_unit if default_unit in _UNIT_WORDS else "lbs"
 
         today = datetime.now(_safe_zone(user_tz))
         today_str = today.strftime("%A, %B %-d, %Y")
@@ -354,7 +367,7 @@ class LLMClient:
         MESSAGE: "{message}"
 
         IMPORTANT:
-        - Extract the numeric weight value and unit (lbs or kg). Default to lbs if not specified.
+        - Extract the numeric weight value and unit (lbs or kg). Default to {unit} if not specified.
         - If the user mentions when they weighed ("yesterday", "this morning", "on Monday"),
           resolve it to a concrete date in YYYY-MM-DD format. Otherwise leave date as null.
         - Any context about the weigh-in (morning, post-workout, fasted, after dinner) goes in notes.
@@ -444,8 +457,10 @@ class LLMClient:
             "- Prescribe ONLY exercises listed in YOUR EXERCISES (or named by the athlete). "
             "Do not introduce new movements (squats, deadlifts, barbell rows, overhead press) "
             "unless they explicitly ask for something new or for an alternative.\n"
-            "- Base every weight on their own last working sets in YOUR EXERCISES / history, "
-            "in the same unit they used. Never prescribe above their last working weight "
+            "- Base every weight on their own last working sets in YOUR EXERCISES / history. "
+            "Write every weight in the athlete's PREFERRED UNIT (stated in the context): "
+            "if a set was logged in the other unit, convert it (1 kg = 2.2 lb) and round to "
+            "a loadable number — never answer in the other unit unless they ask. Never prescribe above their last working weight "
             "after a gap of a week or more — start at or below it. Never use textbook "
             "\"standard\" loads (e.g. 135 lb squat, 95 lb bench) that aren't in their data.\n"
             "- Never output placeholders like \"[Current Weight - 10%]\" — compute the number.\n"
@@ -454,7 +469,7 @@ class LLMClient:
             "building on. Never say \"moderate weight\" or \"a challenging load\".\n"
             "- Progressive overload is the goal over time, not every single session. If they "
             "hit all target reps with room to spare, you can suggest a small bump (+5 lbs "
-            "barbell, +5/hand dumbbell, +2.5 isolation) — offer it, don't demand it. Holding "
+            "barbell, +5/hand dumbbell, +2.5 isolation; in kg: +2.5 barbell, +1-2 otherwise) — offer it, don't demand it. Holding "
             "a weight to groove form, a warm-up set, a deload, or easing back after a gap are "
             "all legitimate choices; treat them as such, never as a failure or a backslide.\n"
             "- Use the signals: if CONSISTENCY shows a long gap or broken streak, account "

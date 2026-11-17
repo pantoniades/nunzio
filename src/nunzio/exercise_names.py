@@ -79,6 +79,17 @@ def score_match(query: str, name: str) -> float:
     return score
 
 
+def same_but_for_equipment(query: str, name: str) -> bool:
+    """True when `name` is `query` plus equipment/angle words the query left out.
+
+    "skull crushers" vs "Dumbbell Skull Crusher": the same movement unless the user
+    does it more than one way — the caller checks that only one candidate qualifies.
+    """
+    q = normalize_tokens(query) - _FILLER_TOKENS
+    n = normalize_tokens(name) - _FILLER_TOKENS
+    return bool(q) and not (q & _VARIANT_TOKENS) and q < n and (n - q) <= _VARIANT_TOKENS
+
+
 # Ordered (first match wins): specific phrases before generic words.
 _GROUP_RULES: list[tuple[str, str]] = [
     (r"\b(run|running|jog|bike|biking|cycling|cycle|elliptical|treadmill|walk|walking"

@@ -5,13 +5,15 @@ per hour it picks the users whose local time is around the morning check-in hour
 computes the single highest-priority trigger for each (a fresh PR, a streak
 milestone, or an inactivity nudge with a suggested focus), and sends one message —
 deduped through the `proactive_log` table so the same event is never sent twice.
+Nudges back off the longer they go unanswered (every other day at first, thinning to
+monthly) and are held entirely while the user has paused them.
 
 The trigger computation (`compute_checkin`) is pure of I/O beyond the DB session and
 takes `today` explicitly, so it can be unit-tested without patching the clock.
 """
 
 import logging
-from datetime import date as date_type, datetime
+from datetime import date as date_type, datetime, time
 
 from .database.connection import db_manager
 from .database.models import now_in_tz
@@ -37,6 +39,18 @@ _MIN_NUDGE_DAYS = 3
 _NUDGE_GAP_FACTOR = 1.5
 # Never nudge more often than every other day, however long the gap runs.
 _MIN_DAYS_BETWEEN_NUDGES = 2
+# Backoff: minimum days before the next nudge, indexed by how many nudges have gone
+# unanswered (sent since the last workout). Nudges never stop — they thin out to
+# monthly. Nov 2026: seven every-other-day nudges landed on an injured user.
+_NUDGE_BACKOFF_DAYS = (2, 2, 4, 7, 14, 30)
+# How far back to look for a last workout once the 90-day window is empty.
+_LAST_WORKOUT_LOOKBACK_DAYS = 3650
+
+
+def nudge_interval_days(unanswered: int) -> int:
+    """Days that must pass after the previous nudge, given how many went unanswered."""
+    idx = min(max(unanswered, 0), len(_NUDGE_BACKOFF_DAYS) - 1)
+    return max(_NUDGE_BACKOFF_DAYS[idx], _MIN_DAYS_BETWEEN_NUDGES)
 
 
 def _as_date(value) -> date_type:
@@ -45,6 +59,7 @@ def _as_date(value) -> date_type:
 
 async def _suggest_focus(session, user_id: int) -> str | None:
     """Name the resistance group most in need of work (untrained, else lowest volume)."""
+    # Unit only has to be consistent: the groups are ranked against each other.
     rows = await workout_set_repo.get_weekly_volume(session, user_id, weeks=4)
     vol: dict[str, float] = {}
     for _yw, mg, v in rows:
@@ -82,24 +97,44 @@ async def compute_checkin(
 
     # 2 & 3. Consistency-based triggers.
     dates_90 = await workout_set_repo.get_workout_dates(session, user_id, days=90)
-    if not dates_90:
-        return None
     dates_30 = [d for d in dates_90 if (today - d).days <= 30]
     stats = compute_consistency(dates_90, dates_30, today)
+    if dates_90:
+        last_workout = max(dates_90)
+    else:
+        # Nothing in 90 days: keep nudging (rarely) off the last workout ever logged.
+        older = await workout_set_repo.get_workout_dates(
+            session, user_id, days=_LAST_WORKOUT_LOOKBACK_DAYS
+        )
+        if not older:
+            return None
+        last_workout = max(older)
+        stats["days_since_last"] = (today - last_workout).days
 
     last_nudge = await proactive_log_repo.last_sent_at(session, user_id, "nudge")
     last_nudge_date = _as_date(last_nudge) if last_nudge else None
+    unanswered = await proactive_log_repo.count_since(
+        session, user_id, "nudge", datetime.combine(last_workout, time.max)
+    )
+    paused_until = await user_settings_repo.get_nudges_paused_until(session, user_id)
 
     # A focus suggestion is only needed for the nudge branch; compute lazily.
-    if _nudge_due(stats, today, last_nudge_date):
+    if _nudge_due(stats, today, last_nudge_date, unanswered, paused_until):
         focus = await _suggest_focus(session, user_id)
     else:
         focus = None
-    return consistency_trigger(stats, today, focus, last_nudge_date)
+    return consistency_trigger(
+        stats, today, focus, last_nudge_date,
+        unanswered=unanswered, paused_until=paused_until,
+    )
 
 
 def _nudge_due(
-    stats: dict, today: date_type, last_nudge: date_type | None = None
+    stats: dict,
+    today: date_type,
+    last_nudge: date_type | None = None,
+    unanswered: int = 0,
+    paused_until: date_type | None = None,
 ) -> bool:
     dsl = stats["days_since_last"]
     avg = stats["avg_gap"]
@@ -108,9 +143,11 @@ def _nudge_due(
         and dsl is not None
         and dsl >= _MIN_NUDGE_DAYS
         and (avg is None or dsl > avg * _NUDGE_GAP_FACTOR)
+        # The user said they're out through this date ("injured till Tuesday").
+        and (paused_until is None or today > paused_until)
         and (
             last_nudge is None
-            or (today - last_nudge).days >= _MIN_DAYS_BETWEEN_NUDGES
+            or (today - last_nudge).days >= nudge_interval_days(unanswered)
         )
     )
 
@@ -120,6 +157,9 @@ def consistency_trigger(
     today: date_type,
     focus_group: str | None,
     last_nudge: date_type | None = None,
+    *,
+    unanswered: int = 0,
+    paused_until: date_type | None = None,
 ) -> tuple[str, str, str] | None:
     """Pure streak/nudge decision from consistency stats (unit-testable, no I/O)."""
     streak = stats["streak"]
@@ -130,7 +170,7 @@ def consistency_trigger(
             f"{streak}-day streak and counting — you're on a roll. Keep it going.",
         )
 
-    if _nudge_due(stats, today, last_nudge):
+    if _nudge_due(stats, today, last_nudge, unanswered, paused_until):
         dsl = stats["days_since_last"]
         focus_line = f" Your {focus_group} could use some attention." if focus_group else ""
         return (

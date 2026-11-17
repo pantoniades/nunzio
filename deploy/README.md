@@ -103,7 +103,9 @@ podman build --format docker -t localhost/nunzio:latest .
 # 4. Run any new DB migration (see "migrations" note below).
 venv/bin/python scripts/migrate_v08.py    # schema; idempotent, safe to re-run
 #    v0.9's migrate_v09.py is a *data* cleanup: dry run by default, --apply to write.
-#    Already applied to the live DB on 2026-10-11. Back up first if you ever re-run it:
+#    Already applied to the live DB on 2026-10-11. v0.10's migrate_v10.py (two
+#    user_settings columns + another cleanup) works the same way; applied 2026-11-16.
+#    Back up first if you ever re-run either:
 #    MYSQL_PWD=... mysqldump -h odysseus -u nunzio --single-transaction --no-tablespaces \
 #      nunzio_workouts exercises workout_sets > backups/pre_<change>_$(date +%Y%m%d).sql
 

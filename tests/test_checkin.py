@@ -2,7 +2,9 @@
 
 from datetime import date
 
-from nunzio.checkin import consistency_trigger
+from datetime import timedelta
+
+from nunzio.checkin import consistency_trigger, nudge_interval_days
 from nunzio.llm.context import rank_lagging_groups
 
 TODAY = date(2026, 7, 13)
@@ -89,5 +91,49 @@ def test_nudge_every_other_day():
 def test_streak_not_blocked_by_recent_nudge():
     kind, _ref, _msg = consistency_trigger(
         _stats(streak=3), TODAY, None, last_nudge=TODAY
+    )
+    assert kind == "streak"
+
+
+# --- v0.10: backoff and pause ---
+
+def test_nudge_interval_backs_off_but_never_stops():
+    assert [nudge_interval_days(n) for n in range(7)] == [2, 2, 4, 7, 14, 30, 30]
+    assert nudge_interval_days(500) == 30
+
+
+def test_unanswered_nudges_thin_out():
+    stats = _stats(days_since_last=20, avg_gap=3.0)
+
+    def due(days_since_nudge: int, unanswered: int) -> bool:
+        last = TODAY - timedelta(days=days_since_nudge)
+        return consistency_trigger(
+            stats, TODAY, None, last_nudge=last, unanswered=unanswered
+        ) is not None
+
+    assert due(2, 1)          # second nudge: still every other day
+    assert not due(2, 2)      # third waits 4 days
+    assert due(4, 2)
+    assert not due(6, 3)      # fourth waits a week
+    assert due(7, 3)
+    assert not due(29, 9)     # long-ignored: monthly, but it does come
+    assert due(30, 9)
+
+
+def test_no_nudge_while_paused():
+    stats = _stats(days_since_last=20, avg_gap=3.0)
+    assert consistency_trigger(stats, TODAY, None, paused_until=TODAY) is None
+    assert consistency_trigger(
+        stats, TODAY, None, paused_until=TODAY + timedelta(days=3)
+    ) is None
+    kind, _ref, _msg = consistency_trigger(
+        stats, TODAY, None, paused_until=TODAY - timedelta(days=1)
+    )
+    assert kind == "nudge"
+
+
+def test_pause_does_not_block_streak():
+    kind, _ref, _msg = consistency_trigger(
+        _stats(streak=3), TODAY, None, paused_until=TODAY + timedelta(days=3)
     )
     assert kind == "streak"

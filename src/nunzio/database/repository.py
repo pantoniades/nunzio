@@ -1,6 +1,6 @@
 """Async repository pattern implementation for database operations."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Generic, List, Optional, Type, TypeVar, Union
 
 from sqlalchemy import delete, func, select
@@ -12,6 +12,7 @@ from .models import (
     Base,
     BodyWeight,
     DEFAULT_TZ,
+    DEFAULT_UNIT,
     Exercise,
     MessageLog,
     ProactiveLog,
@@ -135,6 +136,23 @@ class ExerciseRepository(BaseRepository[Exercise, dict, dict]):
         stmt = select(Exercise)
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    async def delete_if_orphan(self, session: AsyncSession, exercise_id: int) -> bool:
+        """Drop an ad-hoc exercise nobody has sets for any more.
+
+        Catalog exercises (the ones with guidance) are kept. Returns True if deleted.
+        """
+        exercise = await self.get(session, exercise_id)
+        if exercise is None or exercise.guidance:
+            return False
+        in_use = await session.execute(
+            select(WorkoutSet.id).where(WorkoutSet.exercise_id == exercise_id).limit(1)
+        )
+        if in_use.first() is not None:
+            return False
+        await session.delete(exercise)
+        await session.flush()
+        return True
 
     @staticmethod
     def score_match(query: str, name: str) -> float:
@@ -391,10 +409,11 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
         return list(result.scalars().all())
 
     async def get_weekly_volume(
-        self, session: AsyncSession, user_id: int, *, weeks: int = 8
+        self, session: AsyncSession, user_id: int, *, weeks: int = 8, unit: str = "lbs"
     ) -> list:
         """Get weekly volume (weight * reps) grouped by muscle group.
 
+        Sets logged in the other unit are converted, so the totals are all in `unit`.
         Returns list of (yearweek, muscle_group, total_volume) tuples.
         """
         from sqlalchemy import text as sa_text
@@ -402,7 +421,11 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
         stmt = sa_text("""
             SELECT YEARWEEK(ws.set_date, 1) AS yw,
                    e.muscle_group,
-                   SUM(ws.weight * ws.reps) AS total_vol
+                   SUM(ws.weight * ws.reps * CASE
+                       WHEN ws.weight_unit = :unit THEN 1
+                       WHEN ws.weight_unit = 'kg' THEN 2.20462
+                       WHEN ws.weight_unit = 'lbs' THEN 1 / 2.20462
+                       ELSE 1 END) AS total_vol
             FROM workout_sets ws
             JOIN exercises e ON e.id = ws.exercise_id
             WHERE ws.user_id = :uid
@@ -412,7 +435,9 @@ class WorkoutSetRepository(BaseRepository[WorkoutSet, dict, dict]):
             GROUP BY yw, e.muscle_group
             ORDER BY yw DESC, total_vol DESC
         """)
-        result = await session.execute(stmt, {"uid": user_id, "weeks": weeks})
+        result = await session.execute(
+            stmt, {"uid": user_id, "weeks": weeks, "unit": unit}
+        )
         return list(result.fetchall())
 
     async def get_workout_dates(
@@ -546,9 +571,60 @@ class ProactiveLogRepository(BaseRepository[ProactiveLog, dict, dict]):
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def count_since(
+        self, session: AsyncSession, user_id: int, kind: str, since: datetime | None
+    ) -> int:
+        """How many check-ins of this kind were sent to the user after `since`."""
+        stmt = (
+            select(func.count(ProactiveLog.id))
+            .where(ProactiveLog.user_id == user_id)
+            .where(ProactiveLog.kind == kind)
+        )
+        if since is not None:
+            stmt = stmt.where(ProactiveLog.sent_at > since)
+        result = await session.execute(stmt)
+        return result.scalar_one() or 0
+
 
 class UserSettingsRepository(BaseRepository[UserSettings, dict, dict]):
-    """Repository for per-user settings (timezone, etc.)."""
+    """Repository for per-user settings (timezone, weight unit, nudge pause)."""
+
+    async def _upsert(self, session: AsyncSession, user_id: int, **fields) -> None:
+        stmt = select(UserSettings).where(UserSettings.user_id == user_id)
+        result = await session.execute(stmt)
+        settings = result.scalar_one_or_none()
+        if settings is None:
+            session.add(UserSettings(user_id=user_id, **fields))
+        else:
+            for key, value in fields.items():
+                setattr(settings, key, value)
+        await session.flush()
+
+    async def get_weight_unit(self, session: AsyncSession, user_id: int) -> str:
+        """The user's preferred weight unit ("lbs" or "kg"), or the default if unset."""
+        stmt = select(UserSettings.weight_unit).where(UserSettings.user_id == user_id)
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none() or DEFAULT_UNIT
+
+    async def set_weight_unit(
+        self, session: AsyncSession, user_id: int, unit: str
+    ) -> None:
+        await self._upsert(session, user_id, weight_unit=unit)
+
+    async def get_nudges_paused_until(
+        self, session: AsyncSession, user_id: int
+    ) -> date | None:
+        """Last day (inclusive) inactivity nudges are held for, or None."""
+        stmt = select(UserSettings.nudges_paused_until).where(
+            UserSettings.user_id == user_id
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def set_nudges_paused_until(
+        self, session: AsyncSession, user_id: int, until: date | None
+    ) -> None:
+        await self._upsert(session, user_id, nudges_paused_until=until)
 
     async def get_timezone(self, session: AsyncSession, user_id: int) -> str:
         """Return the user's stored IANA timezone, or the default if unset."""
@@ -561,14 +637,7 @@ class UserSettingsRepository(BaseRepository[UserSettings, dict, dict]):
         self, session: AsyncSession, user_id: int, timezone: str
     ) -> None:
         """Upsert the user's timezone preference."""
-        stmt = select(UserSettings).where(UserSettings.user_id == user_id)
-        result = await session.execute(stmt)
-        settings = result.scalar_one_or_none()
-        if settings is None:
-            session.add(UserSettings(user_id=user_id, timezone=timezone))
-        else:
-            settings.timezone = timezone
-        await session.flush()
+        await self._upsert(session, user_id, timezone=timezone)
 
 
 # Repository instances

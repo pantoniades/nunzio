@@ -27,6 +27,7 @@ async def build_coaching_context(
     message: str,
     user_id: int,
     user_tz: str = "America/New_York",
+    unit_pref: str = "lbs",
 ) -> str:
     """Assemble exercise history, guidance, and training principles into a prompt-ready string."""
 
@@ -79,7 +80,7 @@ async def build_coaching_context(
         sections.append(consistency_section)
 
     # 6. Weekly volume trend by muscle group
-    volume_section = await _build_volume_section(session, user_id)
+    volume_section = await _build_volume_section(session, user_id, unit_pref)
     if volume_section:
         sections.append(volume_section)
 
@@ -92,7 +93,7 @@ async def build_coaching_context(
     # 6b. When no specific exercise was named, surface the lagging muscle group so the
     # coach can volunteer a focus ("what should I train today?") instead of waiting.
     if not matched_exercises:
-        lagging_section = await _build_lagging_groups_section(session, user_id)
+        lagging_section = await _build_lagging_groups_section(session, user_id, unit_pref)
         if lagging_section:
             sections.append(lagging_section)
 
@@ -178,6 +179,14 @@ async def build_coaching_context(
     if weight_section:
         sections.append(weight_section)
 
+    # 9. Unit preference — last, so it sits right above the question. History may be
+    # in either unit; the answer must not be ("give recommendations in lb, not kg").
+    other = "kg" if unit_pref == "lbs" else "lbs"
+    sections.append(
+        f"PREFERRED UNIT: {unit_pref}. Write every weight in {unit_pref}. Convert "
+        f"anything logged in {other} (1 kg = 2.2 lb) and round to a loadable number."
+    )
+
     return "\n\n".join(sections)
 
 
@@ -209,9 +218,13 @@ async def _build_consistency_section(
     return "\n".join(lines)
 
 
-async def _build_volume_section(session: AsyncSession, user_id: int) -> str:
+async def _build_volume_section(
+    session: AsyncSession, user_id: int, unit: str = "lbs"
+) -> str:
     """Weekly tonnage by muscle group for the last few weeks (trend signal)."""
-    rows = await workout_set_repo.get_weekly_volume(session, user_id, weeks=8)
+    rows = await workout_set_repo.get_weekly_volume(
+        session, user_id, weeks=8, unit=unit
+    )
     if not rows:
         return ""
 
@@ -220,7 +233,7 @@ async def _build_volume_section(session: AsyncSession, user_id: int) -> str:
     for yw, mg, vol in rows:
         weeks.setdefault(yw, []).append((mg, vol))
 
-    lines = ["VOLUME (weekly tonnage by muscle group, recent first):"]
+    lines = [f"VOLUME (weekly tonnage in {unit} by muscle group, recent first):"]
     for yw, groups in weeks.items():
         year = yw // 100
         week = yw % 100
@@ -298,9 +311,13 @@ def rank_lagging_groups(vol_by_group: dict) -> tuple[list, list]:
     return ranked, untrained
 
 
-async def _build_lagging_groups_section(session: AsyncSession, user_id: int) -> str:
+async def _build_lagging_groups_section(
+    session: AsyncSession, user_id: int, unit: str = "lbs"
+) -> str:
     """Rank resistance groups by recent volume so the coach can steer to what's lagging."""
-    rows = await workout_set_repo.get_weekly_volume(session, user_id, weeks=4)
+    rows = await workout_set_repo.get_weekly_volume(
+        session, user_id, weeks=4, unit=unit
+    )
     if not rows:
         return ""  # no recent lifting to reason about — stay quiet
 
@@ -314,7 +331,7 @@ async def _build_lagging_groups_section(session: AsyncSession, user_id: int) -> 
 
     lines = ["LAGGING MUSCLE GROUPS (last 4 weeks, lowest volume / stalest first):"]
     for g, v in ranked[:4]:
-        lines.append(f"- {g}: {v:,.0f} lbs")
+        lines.append(f"- {g}: {v:,.0f} {unit}")
     for g in untrained:
         lines.append(f"- {g}: not trained in the last 4 weeks")
     return "\n".join(lines)

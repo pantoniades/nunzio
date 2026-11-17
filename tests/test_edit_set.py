@@ -152,7 +152,8 @@ async def test_history_groups_a_day_into_one_session(handler: MessageHandler):
 
     response = await handler.process("low row history", user_id=60009)
     assert "last 1 session:" in response
-    assert "12x40 / 12x55" in response
+    # Test users have no unit preference (default kg), so lbs is spelled out.
+    assert "12x40 lbs / 12x55 lbs" in response
     assert "blue handle" in response
 
     # Clean up

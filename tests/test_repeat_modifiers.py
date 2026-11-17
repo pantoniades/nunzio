@@ -70,14 +70,14 @@ def test_weight_and_times():
 def test_bare_number_as_weight():
     m = parse("again 54")
     assert m["weight"] == 54.0
-    assert m["weight_unit"] == "lbs"
+    assert m["weight_unit"] is None  # unit of the repeated set
     assert m["note"] is None
 
 
 def test_bare_decimal_as_weight():
     m = parse("again 42.5")
     assert m["weight"] == 42.5
-    assert m["weight_unit"] == "lbs"
+    assert m["weight_unit"] is None  # unit of the repeated set
 
 
 def test_note_preserved():
@@ -91,7 +91,7 @@ def test_reps_x_weight():
     m = parse("again 10x55")
     assert m["reps"] == 10
     assert m["weight"] == 55.0
-    assert m["weight_unit"] == "lbs"
+    assert m["weight_unit"] is None  # unit of the repeated set
     assert m["times"] == 1
     assert m["note"] is None
 
@@ -107,7 +107,7 @@ def test_reps_x_weight_with_spaces():
     m = parse("another 10 x 50")
     assert m["reps"] == 10
     assert m["weight"] == 50.0
-    assert m["weight_unit"] == "lbs"
+    assert m["weight_unit"] is None  # unit of the repeated set
 
 
 def test_reps_x_weight_with_comma():
@@ -129,7 +129,7 @@ def test_reps_x_weight_with_note():
 
 def test_reps_at_weight():
     m = parse("Again 12@30")
-    assert (m["reps"], m["weight"], m["weight_unit"]) == (12, 30.0, "lbs")
+    assert (m["reps"], m["weight"], m["weight_unit"]) == (12, 30.0, None)
     assert m["sets"] is None
     assert m["note"] is None
 

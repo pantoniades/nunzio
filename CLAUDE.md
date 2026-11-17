@@ -38,6 +38,14 @@ What works:
 - Coaching context includes set notes (pain, effort, equipment) in history lines
 - Message logging: every message logged to `message_log` table with intent, confidence, and response summary (v0.8: `extracted_data` now stores the classified intent JSON)
 
+### v0.10 additions
+- **Unit preference** (`user_settings.weight_unit`, `set_units` intent): "use pounds", "metric please", "give recommendations in lb, not kg". Default is metric (`DEFAULT_UNIT = "kg"` in `models.py`) for anyone who hasn't chosen; the real Telegram user is set to `lbs`. A weight logged without a unit takes the preference — decided in code (`_states_unit()`), not by the extractor; a stated unit always wins. Stats omit the unit only when it's the preferred one, weekly volume is converted into it (it used to sum kg and lbs raw), and coaching gets a `PREFERRED UNIT` line and converts history logged in the other unit
+- **Nudge pause** (`user_settings.nudges_paused_until`, `pause_nudges` intent): "injured till Tuesday", "pause nudges for a week", "stop reminding me" (no date = until "resume nudges"). The date is inclusive; PR and streak messages are not held
+- **Nudge backoff**: the gap before the next nudge grows with how many went unanswered since the last workout — 2, 2, 4, 7, 14, then 30 days (`_NUDGE_BACKOFF_DAYS`). There is deliberately **no cap**: the user asked that nudges thin out, never stop, so they continue monthly even past the old 90-day cutoff
+- Repeat: a unitless override ("again @40") keeps the repeated set's unit instead of assuming lbs; one that is more than 3× off the last set ("again @4" after 30) is refused with a prompt to add the unit; "again twice" is one batch with set numbers running on (was two batches, both "set 1")
+- Logging "skull crushers" finds the user's one logged "Dumbbell Skull Crusher" (`same_but_for_equipment()`), after exact and scored matching fail; deleting a workout also deletes an ad-hoc exercise it leaves with no sets (`delete_if_orphan`)
+- `scripts/migrate_v10.py` (dry run by default, `--apply`; idempotent): adds the two `user_settings` columns, moves the Nov 14 scapular-pushup and Oct 13 hammer-curl sets to the right exercises, merges Pushup→Push-up, Lateral Raise(s), Skull Crushers→Dumbbell Skull Crusher, deletes orphaned ad-hoc exercises. Applied to the live DB 2026-11-16 (backup in `backups/`)
+
 ### v0.9.1 additions (from the Oct 11 – Nov 16 usage + journal review)
 - Matching: "push-up" / "push up" / "pushups" (and pull/chin/sit/step-up) fold to one token, `scap`→`scapular` — "scapular pushups" had lost to "Pushup" because the catalog's "Scapular Push-Up" tokenized differently. A query that adds qualifiers to a short (≤2-token) name is also penalized ("dumbbell hammer curl" ≠ "Dumbbell Curl"); abbreviations ("bench" → "Bench Press") still match
 - `edit_set` can rename a mis-logged exercise: "these are scapular pushups, not regular ones" (`EditSetData.new_exercise_name`); edit responses now say what changed instead of a bare "updated"
@@ -67,7 +75,7 @@ What works:
 
 **Two interfaces, shared core** — `core.MessageHandler` owns all message processing logic. The CLI (`cli.py`) and Telegram bot (`bot.py`) are thin wrappers. The handler takes a `verbose` flag: CLI gets session IDs and debug detail, the bot gets cleaner output.
 
-**Intent routing** — 9 intents: `log_workout`, `log_weight`, `set_timezone`, `view_stats`, `list_workouts`, `edit_set`, `delete_workout`, `repeat_last`, and `coaching` (catch-all). `view_stats` sub-routes by `stats_type` field on `UserIntent`: overview (default), prs, exercise_history, volume, consistency, weight, last_session.
+**Intent routing** — 11 intents: `log_workout`, `log_weight`, `set_timezone`, `set_units`, `pause_nudges`, `view_stats`, `list_workouts`, `edit_set`, `delete_workout`, `repeat_last`, and `coaching` (catch-all). `view_stats` sub-routes by `stats_type` field on `UserIntent`: overview (default), prs, exercise_history, volume, consistency, weight, last_session.
 
 **Coaching pipeline** — `build_coaching_context()` in `llm/context.py` assembles:
 1. Training principles by priority (plus cardio principles if relevant)
@@ -81,7 +89,7 @@ This context block is injected into the user message alongside a coaching system
 
 **Instructor mode** — Uses `instructor.Mode.JSON` (not TOOLS) because some models generate multiple tool calls which Instructor can't handle. **Exception:** `edit_set` extraction uses `Mode.TOOLS` — the all-optional `EditSetData` schema causes `gemma-4-27b` to return an all-null object under JSON mode, but it extracts correctly under TOOLS (and so does qwen). The client holds two instructor clients (`_instructor_client` JSON, `_instructor_tools_client` TOOLS).
 
-**Proactive check-ins** — `checkin.py` runs as an in-process PTB JobQueue job (hourly, wired in `bot.py` `_post_init`). For each recipient whose local time is `CHECKIN_HOUR`, `compute_checkin()` picks the top-priority trigger (fresh PR > streak milestone > inactivity nudge with a suggested lagging-group focus) and sends one message via `bot.send_message`, deduped through the `proactive_log` table. Nudges need 3+ idle days and at least 2 days since the last nudge (`_MIN_DAYS_BETWEEN_NUDGES`, checked via `proactive_log_repo.last_sent_at`) — the user asked for never more than every other day after getting 15 daily nudges in a row. Recipients come from `TELEGRAM__ALLOWED_USER_IDS` (or all logged users if unrestricted, never `user_id=0`). Requires the `python-telegram-bot[job-queue]` extra.
+**Proactive check-ins** — `checkin.py` runs as an in-process PTB JobQueue job (hourly, wired in `bot.py` `_post_init`). For each recipient whose local time is `CHECKIN_HOUR`, `compute_checkin()` picks the top-priority trigger (fresh PR > streak milestone > inactivity nudge with a suggested lagging-group focus) and sends one message via `bot.send_message`, deduped through the `proactive_log` table. Nudges need 3+ idle days and at least 2 days since the last nudge (`_MIN_DAYS_BETWEEN_NUDGES`) — the user asked for never more than every other day after getting 15 daily nudges in a row. From there they back off by the number sent since the last workout (`nudge_interval_days()`: 2, 2, 4, 7, 14, 30 days) but never stop, and none fire through `user_settings.nudges_paused_until`. Recipients come from `TELEGRAM__ALLOWED_USER_IDS` (or all logged users if unrestricted, never `user_id=0`). Requires the `python-telegram-bot[job-queue]` extra.
 
 **Log comments (hybrid)** — After a log, `_generate_log_comment()` heuristic decides if anything's notable (PR/first-time/gap/weight-up/pain). If so, it's upgraded to an LLM-written, numbers-grounded one-liner via `LLMClient.generate_log_comment()`; on any failure it falls back to the heuristic string. **Tone guardrail (v0.8.1):** the comment/coaching prompts are supportive, not harsh — a load below the last session is treated as a warm-up / back-off / easing-in, never a "step down" or "setback" to scold, and increases are offered, not demanded. `_log_comment_summary()` emits an explicit `NOTE:` line whenever the just-logged top weight is below the last session so the model doesn't misread a warm-up as a regression.
 
@@ -99,6 +107,7 @@ This context block is injected into the user message alongside a coaching system
 - `exercises` table: `name`, `muscle_group`, `description`, `guidance`, `created_at`
 - `training_principles` table: `category`, `title`, `content`, `priority`
 - `message_log` table: `user_id`, `raw_message`, `classified_intent`, `confidence`, `extracted_data` (now populated with the classified `UserIntent` JSON), `response_summary`, `created_at`
+- `user_settings` table (v0.7; columns added v0.10 by `scripts/migrate_v10.py`): `user_id`, `timezone`, `weight_unit` (NULL = default kg), `nudges_paused_until` (DATE, inclusive; NULL = not paused)
 - `proactive_log` table (v0.8): `user_id`, `kind` (pr/streak/nudge), `ref_key`, `sent_at` — dedup for proactive check-ins. Created by `scripts/migrate_v08.py` (idempotent, non-destructive)
 - **Dropped**: `workout_sessions` table (v0.5 — flattened into workout_sets)
 - v0.5 migration: `scripts/migrate_v05.py` (backfills user_id/set_date/batch_id from sessions, drops session_id + workout_sessions)
@@ -156,13 +165,10 @@ This context block is injected into the user message alongside a coaching system
   (`user_id`, `weight`, `unit`, `recorded_at`, `notes`). Weigh-in delta vs. previous
   reading is shown on log ("↓ 2.3 lbs from last weigh-in on Mar 21"). View via
   `view_stats` with `stats_type="weight"`.
-- **Per-user settings — weight_unit + `set_preference`.** *Partially done (v0.7).* The
-  `user_settings` table now exists and timezone is wired through a `set_timezone` intent.
-  Still open: `weight_unit` remains per-set (`workout_sets.weight_unit`), not a user
-  preference, and there's no general `set_preference` intent. The Apr 21 "Store as lb,
-  not kg" message hit the coaching path and the LLM hallucinated compliance — but the
-  next log was still in kg. Needs a `weight_unit` column on `user_settings` plus a
-  `set_preference` intent so unit/preference statements stop falling through to coaching.
+- ~~**Per-user settings — weight_unit.**~~ **Done (v0.10).** `user_settings.weight_unit`
+  plus a `set_units` intent; default metric, per-user override. Sets keep the unit they
+  were logged in (`workout_sets.weight_unit`) — nothing is converted in storage. Still
+  open: PR detection and the log-comment heuristics compare raw weights across units.
 - ~~**Bare "Edit" with no target.**~~ **Partially done (v0.8).** A bare "edit" now
   defaults to the most recent set and echoes it ("Editing Lat Pulldown 10×40 in #135 —
   what should I change?") instead of dead-ending. Supplying the value in a follow-up
@@ -172,13 +178,11 @@ This context block is injected into the user message alongside a coaching system
   consistency metrics (streak, avg gap, 30/90-day counts).
 - ~~**Telegram error handler.**~~ **Done (v0.9.1).** `NunzioBot._on_error` logs transient
   `NetworkError`s at WARNING without a traceback; anything else keeps its traceback.
-- **Pause / back off nudges.** "I have an injury that will keep me from the gym till
-  Tuesday" (Nov 6) went to coaching and the every-other-day nudges kept coming (7 in a
-  row, Nov 2–14; the user replied "as I told you"). Needs a pause-until date the user
-  can set in plain language, and probably a cap on consecutive unanswered nudges.
-- **Exercise data cleanup (v0.9.1 follow-up).** The Nov 14 scapular-pushup sets are
-  stored under "Pushup"; "Push-up"/"Pushup" and "Skull Crushers"/"Dumbbell Skull
-  Crusher" are duplicates; "Triceps Press Machine" is an orphan from a deleted mislog.
+- ~~**Pause / back off nudges.**~~ **Done (v0.10).** `pause_nudges` intent + backoff
+  (see v0.10 additions). No cap on unanswered nudges, by request.
+- ~~**Exercise data cleanup.**~~ **Done (v0.10, `scripts/migrate_v10.py`).** Left alone
+  on purpose: "Lateral Raise" vs "Dumbbell Lateral Raise" (probably the same movement,
+  but only the user knows).
 - **Review real usage regularly.** `message_log` for the real Telegram user (all other
   user_ids are test fixtures) is the best source of next fixes — v0.9 came entirely
   from reviewing Jul–Oct usage.
